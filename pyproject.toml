@@ -1,0 +1,62 @@
+[project]
+name = "daedalus"
+version = "0.1.0"
+description = "Detonation, Analysis & Experimentation — Daedalus Architecture for Linux container Units & Sandboxing"
+readme = "ARCHITECTURE.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [{ name = "Jay", email = "jay@lux.dev" }]
+
+dependencies = [
+    "typer>=0.15",
+    "rich>=13",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.34",
+    "pydantic>=2",
+    "pyyaml>=6",
+    "httpx>=0.28",
+    "mcp>=1.26,<2",
+    "structlog>=24",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.25",
+    "pytest-cov>=6",
+    "hypothesis>=6",
+    "ruff>=0.9",
+    "mypy>=1",
+]
+
+[project.scripts]
+daedalus = "daedalus.cli.main:app"
+daedalus-mcp = "daedalus.mcp.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP", "B", "C4", "SIM"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = [
+    "unit: fast tests with no external dependencies",
+    "integration: tests requiring the container binary",
+    "slow: tests that run actual containers",
+]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+
+[[tool.mypy.overrides]]
+module = ["mcp.*", "mcp", "rich.*", "structlog.*"]
+ignore_missing_imports = true
