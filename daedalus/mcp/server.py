@@ -530,16 +530,65 @@ async def daedalus_logs(
     container_id: str,
     boot: bool = False,
     tail: int | None = None,
+    follow: bool = False,
+    follow_seconds: float = 15.0,
     ctx: Context | None = None,
 ) -> str:
     """Retrieve container stdout or boot logs.
 
     Set boot=True for kernel/boot messages instead of process output.
+    Omit tail to return the full log buffer.  When follow=True, stream for
+    up to follow_seconds (default 15) then return captured output.
     """
     dc = _get_ctx(ctx)
     try:
-        logs = await dc.icarus.logs(container_id, boot=boot, tail=tail)
+        logs = await dc.icarus.logs(
+            container_id,
+            boot=boot,
+            tail=tail,
+            follow=follow,
+            follow_seconds=follow_seconds if follow else None,
+        )
         return logs
+    except DaedalusError as e:
+        return _err(e)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Read all container and system logs",
+        readOnlyHint=True,
+        idempotentHint=True,
+    ),
+)
+async def daedalus_logs_all(
+    all_containers: bool = True,
+    boot: bool = False,
+    tail: int | None = None,
+    include_system: bool = True,
+    system_last: str = "5m",
+    follow: bool = False,
+    follow_seconds: float = 15.0,
+    ctx: Context | None = None,
+) -> str:
+    """Fetch logs for every container plus container daemon system logs.
+
+    Returns JSON with ``containers`` (list of {id, name, image, state, logs}),
+    ``system`` (daemon logs when include_system=True), and ``count``.
+    Omit tail to include full per-container log buffers.
+    """
+    dc = _get_ctx(ctx)
+    try:
+        payload = await dc.icarus.logs_all(
+            all_containers=all_containers,
+            boot=boot,
+            tail=tail,
+            include_system=include_system,
+            system_last=system_last,
+            follow=follow,
+            follow_seconds=follow_seconds,
+        )
+        return _ok(payload)
     except DaedalusError as e:
         return _err(e)
 
@@ -874,13 +923,23 @@ async def daedalus_system_stop(ctx: Context) -> str:
 )
 async def daedalus_system_logs(
     last: str = "5m",
+    follow: bool = False,
+    follow_seconds: float = 15.0,
     ctx: Context | None = None,
 ) -> str:
-    """Fetch container system logs."""
+    """Fetch container system logs.
+
+    Use last to widen the time window (e.g. "1h", "24h", "7d").
+    When follow=True, stream for up to follow_seconds then return output.
+    """
     assert ctx is not None
     dc = _get_ctx(ctx)
     try:
-        logs = await dc.backend.system_logs(last=last)
+        logs = await dc.backend.system_logs(
+            last=last,
+            follow=follow,
+            follow_seconds=follow_seconds if follow else None,
+        )
         return _ok({"logs": logs})
     except DaedalusError as e:
         return _err(e)

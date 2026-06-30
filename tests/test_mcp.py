@@ -9,7 +9,7 @@ from daedalus.mcp import server as mcp_server
 _EXPECTED_TOOLS = {
     "daedalus_health", "daedalus_run", "daedalus_create", "daedalus_list", "daedalus_inspect",
     "daedalus_start", "daedalus_stop", "daedalus_kill", "daedalus_destroy",
-    "daedalus_exec", "daedalus_logs",
+    "daedalus_exec", "daedalus_logs", "daedalus_logs_all",
     "daedalus_image_pull", "daedalus_image_list", "daedalus_image_delete",
     "daedalus_image_inspect", "daedalus_image_push", "daedalus_image_build",
     "daedalus_image_load", "daedalus_image_save", "daedalus_image_tag",

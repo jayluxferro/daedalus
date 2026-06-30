@@ -166,6 +166,10 @@ class Forge:
             args={"image": image, "name": name, "profile": profile},
             result={"id": lab.id},
         )
+        self._store.create(
+            lab.id, image=image, image_digest="", profile=profile,
+            command=command or [], container_name=lab.name,
+        )
         return lab
 
     async def run(
@@ -345,15 +349,15 @@ class Forge:
         return await self.inspect(container_id)
 
     def _resolve_profile(self, lab: Labyrinth) -> str:
-        """Resolve profile from forge memory, store manifest, or container labels."""
-        if lab.profile not in ("", "default"):
-            return lab.profile
-        manifest = self._store.get(lab.id)
-        if manifest and manifest.profile:
-            return manifest.profile
+        """Resolve profile from container labels, store, or forge memory."""
         from_label = _profile_from_raw(lab.info.raw)
         if from_label:
             return from_label
+        manifest = self._store.get(lab.id)
+        if manifest and manifest.profile:
+            return manifest.profile
+        if lab.profile not in ("", "default"):
+            return lab.profile
         return "external"
 
     # ==================================================================

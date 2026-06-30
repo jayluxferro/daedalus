@@ -236,6 +236,10 @@ async def test_mcp_all_tools_live() -> None:
                     "tail": 20,
                 })
 
+                await _mcp_call(session, tracker, "daedalus_logs_all", {
+                    "include_system": False,
+                })
+
                 stopped = await _mcp_call(
                     session, tracker, "daedalus_stop", {"container_id": cid},
                 )

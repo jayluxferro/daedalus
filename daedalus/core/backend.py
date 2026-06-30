@@ -387,6 +387,7 @@ class Backend(ABC):
         container_id: str,
         *,
         follow: bool = False,
+        follow_seconds: float | None = None,
         boot: bool = False,
         tail: int | None = None,
     ) -> str:
@@ -551,7 +552,12 @@ class Backend(ABC):
         ...
 
     @abstractmethod
-    async def system_logs(self, last: str = "5m", follow: bool = False) -> str:
+    async def system_logs(
+        self,
+        last: str = "5m",
+        follow: bool = False,
+        follow_seconds: float | None = None,
+    ) -> str:
         """Fetch system logs."""
         ...
 

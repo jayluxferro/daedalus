@@ -90,8 +90,6 @@ class MockBackend(Backend):
 
     async def logs(self, container_id: str, **kwargs: object) -> str:
         return "mock logs\n"
-
-    # -- interaction --
     async def exec(self, container_id: str, argv: list[str], **opts: object) -> ExecResult:
         return ExecResult(0, f"mock: {' '.join(argv)}", "")
 
@@ -156,7 +154,7 @@ class MockBackend(Backend):
         pass
     async def system_restart(self) -> None:
         pass
-    async def system_logs(self, last: str = "5m", follow: bool = False) -> str:
+    async def system_logs(self, last: str = "5m", follow: bool = False, follow_seconds: float | None = None) -> str:
         return ""
     async def system_kernel_set(self, **kwargs: object) -> None:
         pass
@@ -308,6 +306,18 @@ class TestLifecycle:
         match = [lab for lab in labs if lab.id == info.id]
         assert len(match) == 1
         assert match[0].profile == "external"
+
+    async def test_profile_prefers_label_over_stale_memory(self, forge: Forge) -> None:
+        """In-memory profile must not mask store/label updates from another client."""
+        lab = await forge.run("alpine:latest", name="stale-profile", profile="detonation")
+        lab.info.raw = {
+            "configuration": {"labels": {"daedalus.profile": "bench"}},
+        }
+        forge._store.create(lab.id, image="alpine:latest", profile="bench")
+        labs = await forge.list()
+        match = [item for item in labs if item.id == lab.id]
+        assert len(match) == 1
+        assert match[0].profile == "bench"
 
 
 class TestPolicyIntegration:

@@ -17,6 +17,7 @@ _READ_CALLS: list[tuple[str, dict]] = [
     ("daedalus_profiles", {}),
     ("daedalus_system_status", {}),
     ("daedalus_system_logs", {"last": "1m"}),
+    ("daedalus_logs_all", {"include_system": False}),
     ("daedalus_registry_default_inspect", {}),
     ("daedalus_audit", {"limit": 5}),
     ("daedalus_experiments", {}),

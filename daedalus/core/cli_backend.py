@@ -137,6 +137,29 @@ async def _run_cli_impl(
         )
 
 
+async def _run_cli_bounded(
+    *args: str,
+    binary: str = "container",
+    duration: float = 15.0,
+) -> str:
+    """Run a blocking/follow CLI command for up to ``duration`` seconds."""
+    proc = await asyncio.create_subprocess_exec(
+        binary, *args,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(
+            proc.communicate(), timeout=duration,
+        )
+    except TimeoutError:
+        proc.kill()
+        stdout, stderr = await proc.communicate()
+    out = stdout.decode("utf-8", errors="replace")
+    err = stderr.decode("utf-8", errors="replace")
+    return out if out.strip() else err
+
+
 # ==========================================================================
 # CliBackend
 # ==========================================================================
@@ -278,6 +301,7 @@ class CliBackend(Backend):
         container_id: str,
         *,
         follow: bool = False,
+        follow_seconds: float | None = None,
         boot: bool = False,
         tail: int | None = None,
     ) -> str:
@@ -288,6 +312,10 @@ class CliBackend(Backend):
             cmd.append("--boot")
         if tail is not None:
             cmd += ["-n", str(tail)]
+        if follow:
+            return await _run_cli_bounded(
+                *cmd, binary=self._binary, duration=follow_seconds or 15.0,
+            )
         _, out, _ = await _run_cli_impl(*cmd, binary=self._binary)
         return out
 
@@ -521,10 +549,18 @@ class CliBackend(Backend):
     async def system_restart(self) -> None:
         await _run_cli_impl("system", "restart", binary=self._binary)
 
-    async def system_logs(self, last: str = "5m", follow: bool = False) -> str:
+    async def system_logs(
+        self,
+        last: str = "5m",
+        follow: bool = False,
+        follow_seconds: float | None = None,
+    ) -> str:
         cmd = ["system", "logs", "--last", last]
         if follow:
             cmd.append("--follow")
+            return await _run_cli_bounded(
+                *cmd, binary=self._binary, duration=follow_seconds or 15.0,
+            )
         _, out, _ = await _run_cli_impl(*cmd, binary=self._binary)
         return out
 
