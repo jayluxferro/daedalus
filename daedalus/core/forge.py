@@ -10,6 +10,9 @@ applied *before* any backend call.
 
 from __future__ import annotations
 
+import json
+import os
+import contextlib
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -18,8 +21,12 @@ from daedalus.core.audit import ActorKind, AuditLog
 from daedalus.core.backend import Backend, ContainerInfo, RunSpec
 from daedalus.core.capabilities import CapabilityManifest
 from daedalus.core.exceptions import ValidationError
+from daedalus.core.minos import Minos
+from daedalus.core.network import has_network_addresses
 from daedalus.core.policy import Decision, PolicyEngine
-from daedalus.core.store import Store
+from daedalus.core.store import Artifact, Store
+
+DAEDALUS_PROFILE_LABEL = "daedalus.profile"
 
 # ==========================================================================
 # Enriched container model
@@ -136,11 +143,15 @@ class Forge:
         *,
         name: str | None = None,
         profile: str = "default",
+        confirm_kernel: bool = False,
         **kwargs: Any,
     ) -> Labyrinth:
         """Create a container (does not start it)."""
-        await self._check_run(image)
-        spec = RunSpec(image=image, name=name, **_filter_run_kwargs(kwargs))
+        await self._check_run(image, confirm_kernel=confirm_kernel, **kwargs)
+        spec = RunSpec(
+            image=image, name=name,
+            **_filter_run_kwargs(_with_profile_label(kwargs, profile)),
+        )
         info = await self._backend.create(spec)
         lab = Labyrinth(info=info, profile=profile, created_at=_now())
         self._labyrinths[lab.id] = lab
@@ -159,12 +170,14 @@ class Forge:
         profile: str = "default",
         detach: bool = False,
         command: list[str] | None = None,
+        confirm_kernel: bool = False,
         **kwargs: Any,
     ) -> Labyrinth:
         """Create and start a container."""
-        await self._check_run(image)
+        await self._check_run(image, confirm_kernel=confirm_kernel, **kwargs)
         spec = RunSpec(
-            image=image, name=name, detach=detach, command=command, **_filter_run_kwargs(kwargs),
+            image=image, name=name, detach=detach, command=command,
+            **_filter_run_kwargs(_with_profile_label(kwargs, profile)),
         )
         info = await self._backend.run(spec)
         lab = Labyrinth(info=info, profile=profile, created_at=_now())
@@ -182,7 +195,13 @@ class Forge:
 
     async def start(self, container_id: str) -> Labyrinth:
         await self._backend.start(container_id)
-        return await self._refresh(container_id)
+        lab = await self._refresh(container_id)
+        self._audit.record(
+            "start", actor="forge", actor_kind=ActorKind.SERVICE,
+            args={"container_id": container_id},
+            result={"id": lab.id, "state": lab.state},
+        )
+        return lab
 
     async def stop(self, container_id: str, timeout: int = 10) -> Labyrinth:
         await self._backend.stop(container_id, timeout=timeout)
@@ -210,15 +229,26 @@ class Forge:
             args={"container_id": container_id, "force": force},
         )
 
-    async def destroy(self, container_id: str, *, confirm: bool = False) -> None:
+    async def destroy(self, container_id: str, *, confirm: bool = False) -> dict[str, Any] | None:
         """Destroy a Labyrinth: stop (if running) then delete.
 
         Requires explicit ``confirm=True`` (policy-gated).
+        Returns a behavioral report dict when analysis completes.
         """
         r = self._policy.check_destroy(confirm=confirm)
         if r.decision == Decision.CONFIRM:
             raise ValidationError("destroy requires confirm=True")
         self._policy.enforce(r)
+
+        manifest = self._store.get(container_id)
+        boot_log = ""
+        process_logs = ""
+        try:
+            boot_log = await self._backend.logs(container_id, boot=True)
+            process_logs = await self._backend.logs(container_id)
+        except Exception:
+            pass
+
         try:
             await self._backend.stop(container_id, timeout=5)
         except Exception:
@@ -229,24 +259,61 @@ class Forge:
             "destroy", actor="forge", actor_kind=ActorKind.SERVICE,
             args={"container_id": container_id, "confirm": True},
         )
+
+        report_data: dict[str, Any] | None = None
+        try:
+            minos = Minos(self._backend)
+            report = await minos.analyze(
+                container_id,
+                image=manifest.image if manifest else "",
+                image_digest=manifest.image_digest if manifest else "",
+                boot_log=boot_log or process_logs,
+            )
+            report_data = report.to_dict()
+            report_path = os.path.join(
+                self._store.root, f"{container_id}.report.json",
+            )
+            with open(report_path, "w") as f:
+                f.write(json.dumps(report_data, indent=2))
+            self._store.add_artifact(
+                container_id,
+                Artifact(
+                    name="behavioral_report.json",
+                    path=report_path,
+                    kind="report",
+                    description="Minos behavioral report",
+                ),
+            )
+        except Exception:
+            report_data = None
+
         self._store.update(container_id, exit_code=0)
+        return report_data
 
     async def list(self, all: bool = False) -> list[Labyrinth]:
         infos = await self._backend.list(all=all)
         labs = []
         for info in infos:
             if info.id in self._labyrinths:
-                self._labyrinths[info.id].info = info
-                labs.append(self._labyrinths[info.id])
+                lab = self._labyrinths[info.id]
+                lab.info = info
             else:
                 lab = Labyrinth(info=info)
                 self._labyrinths[info.id] = lab
-                labs.append(lab)
+            if (
+                lab.info.state == lab.info.state.RUNNING
+                and not has_network_addresses(lab.info.raw)
+            ):
+                with contextlib.suppress(Exception):
+                    lab.info = await self._backend.inspect(lab.id)
+            lab.profile = self._resolve_profile(lab)
+            labs.append(lab)
         return labs
 
     async def inspect(self, container_id: str) -> Labyrinth:
         info = await self._backend.inspect(container_id)
         lab = Labyrinth(info=info)
+        lab.profile = self._resolve_profile(lab)
         self._labyrinths[container_id] = lab
         return lab
 
@@ -254,6 +321,18 @@ class Forge:
         if container_id in self._labyrinths:
             return self._labyrinths[container_id]
         return await self.inspect(container_id)
+
+    def _resolve_profile(self, lab: Labyrinth) -> str:
+        """Resolve profile from forge memory, store manifest, or container labels."""
+        if lab.profile not in ("", "default"):
+            return lab.profile
+        manifest = self._store.get(lab.id)
+        if manifest and manifest.profile:
+            return manifest.profile
+        from_label = _profile_from_raw(lab.info.raw)
+        if from_label:
+            return from_label
+        return "external"
 
     # ==================================================================
     # System
@@ -285,15 +364,39 @@ class Forge:
     # Internals
     # ==================================================================
 
-    async def _check_run(self, image: str) -> None:
+    async def _check_run(
+        self,
+        image: str,
+        *,
+        confirm_kernel: bool = False,
+        **kwargs: Any,
+    ) -> None:
         """Run policy checks before creating/starting a container."""
         r = self._policy.check_image(image)
+        self._policy.log("check_image", "forge", r)
         self._policy.enforce(r)
+
         running_count = sum(
             1 for lab in self._labyrinths.values() if lab.is_running
         )
         r = self._policy.check_concurrency(running_count)
+        self._policy.log("check_concurrency", "forge", r)
         self._policy.enforce(r)
+
+        disk = await self._backend.system_df()
+        used = disk.get("used")
+        if isinstance(used, int):
+            r = self._policy.check_disk(used)
+            self._policy.log("check_disk", "forge", r)
+            self._policy.enforce(r)
+
+        kernel = kwargs.get("kernel")
+        if kernel:
+            r = self._policy.check_kernel_change(confirm=confirm_kernel)
+            if r.decision == Decision.CONFIRM:
+                raise ValidationError("kernel change requires confirm_kernel=True")
+            self._policy.log("check_kernel_change", "forge", r)
+            self._policy.enforce(r)
 
     async def _refresh(self, container_id: str) -> Labyrinth:
         info = await self._backend.inspect(container_id)
@@ -321,3 +424,21 @@ _RUNSPEC_FIELDS = {
 def _filter_run_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
     """Filter kwargs to only include valid RunSpec fields."""
     return {k: v for k, v in kwargs.items() if k in _RUNSPEC_FIELDS}
+
+
+def _with_profile_label(kwargs: dict[str, Any], profile: str) -> dict[str, Any]:
+    labels = dict(kwargs.get("labels") or {})
+    labels[DAEDALUS_PROFILE_LABEL] = profile
+    return {**kwargs, "labels": labels}
+
+
+def _profile_from_raw(raw: dict[str, Any]) -> str | None:
+    if not raw:
+        return None
+    cfg = raw.get("configuration", raw)
+    if not isinstance(cfg, dict):
+        return None
+    labels = cfg.get("labels", {})
+    if isinstance(labels, dict) and DAEDALUS_PROFILE_LABEL in labels:
+        return str(labels[DAEDALUS_PROFILE_LABEL])
+    return None

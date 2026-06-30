@@ -55,7 +55,7 @@ daedalus destroy <id> --confirm
 
 ## MCP tools
 
-`daedalus_health` `daedalus_run` `daedalus_list` `daedalus_inspect` `daedalus_stop` `daedalus_destroy` `daedalus_exec` `daedalus_logs` `daedalus_image_pull` `daedalus_image_list` `daedalus_profiles`
+`daedalus_health` `daedalus_run` `daedalus_start` `daedalus_stop` `daedalus_list` `daedalus_inspect` `daedalus_destroy` `daedalus_exec` `daedalus_logs` `daedalus_image_pull` `daedalus_image_list` `daedalus_image_delete` `daedalus_image_inspect` `daedalus_image_push` `daedalus_image_build` `daedalus_image_load` `daedalus_profiles` `daedalus_system_status` `daedalus_audit` `daedalus_experiments` `daedalus_dns_list` `daedalus_dns_create` `daedalus_dns_delete`
 
 Set up via `mcp.json`:
 ```json

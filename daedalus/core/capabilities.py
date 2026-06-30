@@ -66,6 +66,9 @@ class CapabilityManifest:
     # -- timestamp -------------------------------------------------------
     probe_time: str = ""
 
+    # -- runtime feature matrix (derived from probes + flag inventory) ---
+    runtime_features: dict[str, bool | str] = field(default_factory=dict)
+
     # -- derived properties ----------------------------------------------
 
     @property
@@ -199,6 +202,7 @@ def probe(*, container_path: str | None = None) -> CapabilityManifest:
     m.builder = _probe_builder(m)
     m.system_dns = _probe_system_dns(m)
     m.gpu = _probe_gpu(m)
+    m.runtime_features = _runtime_features(m)
 
     m.probe_time = _now()
     return m
@@ -330,12 +334,14 @@ def _probe_kernel_set(m: CapabilityManifest) -> bool | str:
 
 
 def _probe_init_image(m: CapabilityManifest) -> bool | str:
-    """Check if ``--init-image`` flag is recognised.
-
-    Pass a fake value and inspect the error: if the CLI complains about
-    the *value* rather than the *flag*, the flag is supported.
-    """
+    """Check if ``--init-image`` flag is recognised."""
     try:
+        r = subprocess.run(
+            [m.container_binary, "run", "--help"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if "--init-image" not in (r.stdout + r.stderr):
+            return False
         r = subprocess.run(
             [m.container_binary, "create", "--init-image",
              "__daedalus_probe_nonexistent__", "nonexistent:latest"],
@@ -413,6 +419,35 @@ def _probe_gpu(m: CapabilityManifest) -> bool | str:
         return "--gpu" in (r.stdout + r.stderr)
     except Exception:
         return "untested"
+
+
+def _runtime_features(m: CapabilityManifest) -> dict[str, bool | str]:
+    """Summarise what the container CLI supports for DAEDALUS consumers."""
+    flags = m.known_flags
+    has_mount = "mount" in flags and "volume" in flags
+    has_publish = "publish" in flags or "p" in flags
+    has_network_cmd = _probe_network_subcommand(m)
+    return {
+        "port_forwarding": bool(has_publish),
+        "vmnet_host_access": m.networking is True,
+        "bind_mounts_at_create": bool(has_mount),
+        "volume_hot_attach": False,
+        "oci_image_load": True,
+        "iso_raw_disk_images": False,
+        "custom_networks": has_network_cmd is True,
+        "shared_default_network": m.networking is True,
+    }
+
+
+def _probe_network_subcommand(m: CapabilityManifest) -> bool | str:
+    try:
+        r = subprocess.run(
+            [m.container_binary, "network", "--help"],
+            capture_output=True, text=True, timeout=10,
+        )
+        return r.returncode == 0 and "create" in (r.stdout + r.stderr).lower()
+    except Exception:
+        return False
 
 
 def _now() -> str:

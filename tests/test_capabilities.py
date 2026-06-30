@@ -70,6 +70,16 @@ class TestCapabilityProbe:
         assert d["host_arch"] == m.host_arch
         assert d["container_binary"] == m.container_binary
         assert d["networking"] == m.networking
+        assert "runtime_features" in d
+        assert d["init_image"] is False or d["init_image"] is True
+
+    def test_runtime_features_populated(self):
+        m = probe()
+        rf = m.runtime_features
+        assert "port_forwarding" in rf
+        assert "vmnet_host_access" in rf
+        assert rf["port_forwarding"] is False
+        assert rf["bind_mounts_at_create"] is True
 
 
 class TestCapabilityManifestUnit:

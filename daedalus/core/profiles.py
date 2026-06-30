@@ -66,6 +66,14 @@ class Profile:
 # ==========================================================================
 
 BUILTIN_PROFILES: dict[str, Profile] = {
+    "general": Profile(
+        name="general",
+        description=(
+            "General-purpose Linux environment. No security restrictions — "
+            "use for development, services, or everyday container work."
+        ),
+    ),
+
     "detonation": Profile(
         name="detonation",
         description=(

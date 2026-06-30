@@ -16,6 +16,7 @@ from dataclasses import dataclass
 
 from daedalus.core.audit import ActorKind, AuditLog
 from daedalus.core.backend import Backend, ExecResult
+from daedalus.core.tty_session import TtySession, close_tty_session, open_container_shell
 
 
 @dataclass
@@ -42,9 +43,16 @@ class Icarus:
         Optional audit log for operation recording.
     """
 
-    def __init__(self, backend: Backend, *, audit: AuditLog | None = None) -> None:
+    def __init__(
+        self,
+        backend: Backend,
+        *,
+        audit: AuditLog | None = None,
+        runtime_binary: str = "container",
+    ) -> None:
         self._backend = backend
         self._audit = audit or AuditLog()
+        self._runtime_binary = runtime_binary
 
     async def exec(
         self,
@@ -113,4 +121,36 @@ class Icarus:
         """
         return await self._backend.logs(
             container_id, follow=follow, boot=boot, tail=tail,
+        )
+
+    async def spawn_shell(
+        self,
+        container_id: str,
+        *,
+        argv: tuple[str, ...] = ("sh",),
+        actor: str = "icarus",
+        actor_kind: ActorKind = ActorKind.SERVICE,
+    ) -> TtySession:
+        """Open an interactive PTY shell inside a running container."""
+        session = await open_container_shell(
+            self._runtime_binary, container_id, argv=argv,
+        )
+        self._audit.record(
+            "shell_attach", actor=actor, actor_kind=actor_kind,
+            args={"container_id": container_id, "argv": list(argv)},
+        )
+        return session
+
+    async def close_shell(
+        self,
+        session: TtySession,
+        *,
+        actor: str = "icarus",
+        actor_kind: ActorKind = ActorKind.SERVICE,
+    ) -> None:
+        """Close an interactive shell session."""
+        await close_tty_session(session)
+        self._audit.record(
+            "shell_detach", actor=actor, actor_kind=actor_kind,
+            args={"container_id": session.container_id},
         )

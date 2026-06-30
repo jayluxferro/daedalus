@@ -27,10 +27,11 @@ from daedalus.core.exceptions import DaedalusError
 from daedalus.core.forge import Forge
 from daedalus.core.icarus import ExecOptions, Icarus
 from daedalus.core.mint import Mint
-from daedalus.core.policy import PolicyEngine
+from daedalus.core.policy import PolicyEngine, PolicyResult
 from daedalus.core.profiles import ProfileRegistry
 from daedalus.core.store import Store
 from daedalus.core.talos import Talos
+from daedalus.core.network import network_names, primary_ip
 
 # ==========================================================================
 # Lifespan — no module-level I/O
@@ -61,13 +62,26 @@ async def daedalus_lifespan(server: FastMCP) -> AsyncIterator[DaedalusContext]:
     audit = AuditLog()
     store = Store()
     policy = PolicyEngine()
-    policy.config.on_decision = _audit_policy_decision
+    audit_ref: list[AuditLog] = []
+
+    def _policy_audit(operation: str, actor: str, result: PolicyResult) -> None:
+        if audit_ref:
+            audit_ref[0].record(
+                "policy", actor=actor, actor_kind=ActorKind.AGENT,
+                args={
+                    "operation": operation,
+                    "decision": result.decision.value,
+                    "reason": result.reason,
+                },
+            )
+
+    policy.config.on_decision = _policy_audit
 
     ctx = DaedalusContext(
         caps=caps,
         backend=backend,
         forge=Forge(backend, caps, policy=policy, audit=audit, store=store),
-        icarus=Icarus(backend, audit=audit),
+        icarus=Icarus(backend, audit=audit, runtime_binary=caps.container_binary),
         mint=Mint(backend, audit=audit),
         talos=Talos(backend, caps, audit=audit),
         profiles=ProfileRegistry(),
@@ -75,6 +89,7 @@ async def daedalus_lifespan(server: FastMCP) -> AsyncIterator[DaedalusContext]:
         audit=audit,
         store=store,
     )
+    audit_ref.append(audit)
     try:
         yield ctx
     finally:
@@ -82,8 +97,8 @@ async def daedalus_lifespan(server: FastMCP) -> AsyncIterator[DaedalusContext]:
 
 
 def _audit_policy_decision(operation: str, actor: str, result: object) -> None:
-    """Bridge policy decisions into the audit log."""
-    pass  # wired when audit reference is available from lifespan context
+    """Legacy hook — replaced in lifespan."""
+    del operation, actor, result
 
 
 def _get_ctx(ctx: Context | None) -> DaedalusContext:
@@ -130,15 +145,15 @@ Core capabilities:
 - Create and manage disposable Linux VMs via `daedalus_run`
 - Execute commands inside containers via `daedalus_exec`
 - Pull and manage OCI container images via `daedalus_image_*`
-- Control DNS and networking via `daedalus_network_*`
+- Control system DNS via `daedalus_dns_*`
 
 Safety rules:
 1. ALWAYS call `daedalus_health` first to check what the host supports
-2. Destructive operations (`daedalus_destroy`, `daedalus_network_delete`)
+2. Destructive operations (`daedalus_destroy`, `daedalus_dns_delete`)
    require `confirm=True` and are logged in the audit trail
-3. The default `detonation` profile applies maximum isolation:
-   capabilities dropped, read-only filesystem, internal network
-4. Every operation is recorded in the tamper-evident audit log
+3. The default `detonation` profile applies maximum isolation
+4. Kernel overrides require `confirm_kernel=True` on `daedalus_run`
+5. Every operation is recorded in the tamper-evident audit log
 
 You are the agent — DAEDALUS is your laboratory. Stay safe.""",
     lifespan=daedalus_lifespan,
@@ -191,6 +206,13 @@ async def daedalus_run(
     name: str | None = None,
     detach: bool = True,
     command: list[str] | None = None,
+    kernel: str | None = None,
+    cpus: int | None = None,
+    memory: str | None = None,
+    dns: list[str] | None = None,
+    volumes: list[str] | None = None,
+    mounts: list[str] | None = None,
+    confirm_kernel: bool = False,
     ctx: Context | None = None,
 ) -> str:
     """Create and start a Labyrinth container for safe analysis.
@@ -207,17 +229,33 @@ async def daedalus_run(
     dc = _get_ctx(ctx)
     try:
         p = dc.profiles.get(profile)
-        kwargs = p.apply()
+        overrides: dict[str, object] = {}
+        if kernel is not None:
+            overrides["kernel"] = kernel
+        if cpus is not None:
+            overrides["cpus"] = cpus
+        if memory is not None:
+            overrides["memory"] = memory
+        if dns is not None:
+            overrides["dns"] = dns
+        if volumes is not None:
+            overrides["volumes"] = volumes
+        if mounts is not None:
+            overrides["mounts"] = mounts
+        kwargs = p.apply(**overrides)
         await ctx.report_progress(10, 100, "Creating container...")
         lab = await dc.forge.run(
             image, name=name, detach=detach,
-            profile=profile, command=command, **kwargs,
+            profile=profile, command=command,
+            confirm_kernel=confirm_kernel, **kwargs,
         )
         await ctx.report_progress(100, 100, "Container running")
         _audit_agent(dc, "run", {"image": image, "profile": profile},
                      {"id": lab.id})
         return _ok({"id": lab.id, "name": lab.name, "image": lab.image,
-                    "state": lab.state, "profile": lab.profile})
+                    "state": lab.state, "profile": lab.profile,
+                    "ip": primary_ip(lab.info.raw),
+                    "networks": network_names(lab.info.raw)})
     except DaedalusError as e:
         _audit_agent(dc, "run", {"image": image}, error=e.message)
         return _err(e)
@@ -233,13 +271,17 @@ async def daedalus_run(
 async def daedalus_list(all: bool = False, ctx: Context | None = None) -> str:
     """List containers. Pass all=True to include stopped containers.
 
-    Returns a JSON array of {id, name, image, state, profile} objects.
+    Returns a JSON array of {id, name, image, state, profile, ip, networks} objects.
     """
     dc = _get_ctx(ctx)
     try:
         labs = await dc.forge.list(all=all)
-        return json.dumps([{"id": lab.id, "name": lab.name, "image": lab.image,
-                           "state": lab.state, "profile": lab.profile} for lab in labs])
+        return json.dumps([{
+            "id": lab.id, "name": lab.name, "image": lab.image,
+            "state": lab.state, "profile": lab.profile,
+            "ip": primary_ip(lab.info.raw),
+            "networks": network_names(lab.info.raw),
+        } for lab in labs])
     except DaedalusError as e:
         return _err(e)
 
@@ -282,6 +324,25 @@ async def daedalus_stop(container_id: str, ctx: Context) -> str:
 
 @mcp.tool(
     annotations=ToolAnnotations(
+        title="Start a stopped container",
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=True,
+    ),
+)
+async def daedalus_start(container_id: str, ctx: Context) -> str:
+    """Start a previously stopped container."""
+    dc = _get_ctx(ctx)
+    try:
+        lab = await dc.forge.start(container_id)
+        _audit_agent(dc, "start", {"container_id": container_id})
+        return _ok({"id": lab.id, "state": lab.state})
+    except DaedalusError as e:
+        return _err(e)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
         title="Destroy a container permanently",
         readOnlyHint=False,
         destructiveHint=True,
@@ -296,9 +357,12 @@ async def daedalus_destroy(container_id: str, confirm: bool = False, ctx: Contex
     """
     dc = _get_ctx(ctx)
     try:
-        await dc.forge.destroy(container_id, confirm=confirm)
+        report = await dc.forge.destroy(container_id, confirm=confirm)
         _audit_agent(dc, "destroy", {"container_id": container_id, "confirm": confirm})
-        return _ok({"id": container_id, "destroyed": True})
+        payload: dict[str, object] = {"id": container_id, "destroyed": True}
+        if report:
+            payload["report"] = report
+        return _ok(payload)
     except DaedalusError as e:
         return _err(e)
 
@@ -321,6 +385,7 @@ async def daedalus_exec(
     command: list[str],
     user: str | None = None,
     workdir: str | None = None,
+    env: dict[str, str] | None = None,
     ctx: Context | None = None,
 ) -> str:
     """Execute a command inside a running container.
@@ -329,7 +394,7 @@ async def daedalus_exec(
     """
     dc = _get_ctx(ctx)
     try:
-        opts = ExecOptions(user=user, workdir=workdir)
+        opts = ExecOptions(user=user, workdir=workdir, env=env)
         result = await dc.icarus.exec(container_id, command, options=opts)
         _audit_agent(dc, "exec", {"container_id": container_id, "command": command})
         return _ok({"exit_code": result.exit_code, "stdout": result.stdout,
@@ -407,8 +472,255 @@ async def daedalus_image_list(ctx: Context) -> str:
     dc = _get_ctx(ctx)
     try:
         images = await dc.mint.list()
-        return json.dumps([{"name": i.name, "tag": i.tag, "size": i.size}
+        return json.dumps([{"name": i.name, "tag": i.tag, "size": i.size, "digest": i.digest}
                           for i in images])
+    except DaedalusError as e:
+        return _err(e)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Delete a local image",
+        readOnlyHint=False,
+        destructiveHint=True,
+        idempotentHint=False,
+    ),
+)
+async def daedalus_image_delete(
+    image: str,
+    force: bool = False,
+    ctx: Context | None = None,
+) -> str:
+    """Delete a local container image."""
+    dc = _get_ctx(ctx)
+    try:
+        await dc.mint.delete(image, force=force)
+        _audit_agent(dc, "image_delete", {"image": image, "force": force})
+        return _ok({"name": image, "deleted": True})
+    except DaedalusError as e:
+        return _err(e)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Inspect a local image",
+        readOnlyHint=True,
+        idempotentHint=True,
+    ),
+)
+async def daedalus_image_inspect(image: str, ctx: Context) -> str:
+    """Inspect a local container image. Returns metadata as JSON."""
+    dc = _get_ctx(ctx)
+    try:
+        img = await dc.mint.inspect(image)
+        return json.dumps({
+            "name": img.name, "id": img.id, "digest": img.digest,
+            "size": img.size, "tag": img.tag, "raw": img.raw,
+        }, indent=2)
+    except DaedalusError as e:
+        return _err(e)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Push a local image to a registry",
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=True,
+    ),
+)
+async def daedalus_image_push(image: str, ctx: Context) -> str:
+    """Push a local image to its registry."""
+    dc = _get_ctx(ctx)
+    try:
+        await dc.mint.push(image)
+        _audit_agent(dc, "image_push", {"image": image})
+        return _ok({"name": image, "pushed": True})
+    except DaedalusError as e:
+        return _err(e)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Load an image from an OCI tar archive",
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=False,
+    ),
+)
+async def daedalus_image_load(path: str, ctx: Context) -> str:
+    """Load an image from an OCI-compatible tar archive (``container images load``)."""
+    dc = _get_ctx(ctx)
+    try:
+        img = await dc.mint.load(path)
+        _audit_agent(dc, "image_load", {"path": path})
+        return _ok({"name": img.name, "id": img.id, "loaded": True})
+    except DaedalusError as e:
+        return _err(e)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Build an image from a Containerfile",
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=True,
+    ),
+)
+async def daedalus_image_build(
+    tag: str,
+    context: str = ".",
+    file: str | None = None,
+    target: str | None = None,
+    arch: str | None = None,
+    no_cache: bool = False,
+    ctx: Context | None = None,
+) -> str:
+    """Build a container image from a Containerfile/Dockerfile context."""
+    assert ctx is not None
+    dc = _get_ctx(ctx)
+    try:
+        from daedalus.core.backend import BuildSpec
+
+        spec = BuildSpec(
+            context=context, file=file, tag=tag,
+            target=target, arch=arch, no_cache=no_cache,
+        )
+        img = await dc.mint.build(spec)
+        _audit_agent(dc, "image_build", {"tag": tag, "context": context})
+        return _ok({"name": img.name, "id": img.id, "built": True})
+    except DaedalusError as e:
+        return _err(e)
+
+
+# ==========================================================================
+# System / DNS / Audit / Experiments
+# ==========================================================================
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="System status",
+        readOnlyHint=True,
+        idempotentHint=True,
+    ),
+)
+async def daedalus_system_status(ctx: Context) -> str:
+    """Return aggregated system status (daemon, counts, disk, capabilities)."""
+    dc = _get_ctx(ctx)
+    status = await dc.forge.system_status()
+    return json.dumps({
+        "container_version": status.container_version,
+        "container_commit": status.container_commit,
+        "apiserver_running": status.apiserver_running,
+        "container_count": status.container_count,
+        "running_count": status.running_count,
+        "disk_usage": status.disk_usage,
+        "capabilities": status.capabilities,
+    }, indent=2)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Query audit log",
+        readOnlyHint=True,
+        idempotentHint=True,
+    ),
+)
+async def daedalus_audit(
+    operation: str | None = None,
+    actor: str | None = None,
+    limit: int = 100,
+    ctx: Context | None = None,
+) -> str:
+    """Query the tamper-evident audit log."""
+    dc = _get_ctx(ctx)
+    entries = dc.audit.query(operation=operation, actor=actor, limit=limit)
+    return json.dumps([{
+        "operation": e.operation,
+        "actor": e.actor,
+        "actor_kind": e.actor_kind.value,
+        "args": e.args,
+        "result": e.result,
+        "error": e.error,
+        "timestamp": e.timestamp,
+        "entry_id": e.entry_id,
+    } for e in entries], indent=2)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="List experiment manifests",
+        readOnlyHint=True,
+        idempotentHint=True,
+    ),
+)
+async def daedalus_experiments(ctx: Context) -> str:
+    """List stored run manifests (experiment history)."""
+    dc = _get_ctx(ctx)
+    from dataclasses import asdict
+    return json.dumps([asdict(m) for m in dc.store.list()], indent=2, default=str)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="List system DNS domains",
+        readOnlyHint=True,
+        idempotentHint=True,
+    ),
+)
+async def daedalus_dns_list(ctx: Context) -> str:
+    """List local DNS domains managed by the container runtime."""
+    dc = _get_ctx(ctx)
+    try:
+        domains = await dc.talos.system_dns_list()
+        return json.dumps(domains)
+    except DaedalusError as e:
+        return _err(e)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Create system DNS domain",
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+    ),
+)
+async def daedalus_dns_create(domain: str, ctx: Context) -> str:
+    """Create a local DNS domain (may require administrator privileges)."""
+    dc = _get_ctx(ctx)
+    try:
+        await dc.talos.system_dns_create(domain)
+        _audit_agent(dc, "system_dns_create", {"domain": domain})
+        return _ok({"domain": domain, "created": True})
+    except DaedalusError as e:
+        return _err(e)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Delete system DNS domain",
+        readOnlyHint=False,
+        destructiveHint=True,
+        idempotentHint=False,
+    ),
+)
+async def daedalus_dns_delete(domain: str, confirm: bool = False, ctx: Context | None = None) -> str:
+    """Delete a local DNS domain. Requires confirm=True."""
+    if not confirm:
+        raise ValueError(json.dumps({
+            "error": "confirm=True required for DNS domain deletion",
+            "code": "CONFIRM_REQUIRED",
+        }))
+    dc = _get_ctx(ctx)
+    try:
+        await dc.talos.system_dns_delete(domain)
+        _audit_agent(dc, "system_dns_delete", {"domain": domain, "confirm": confirm})
+        return _ok({"domain": domain, "deleted": True})
     except DaedalusError as e:
         return _err(e)
 
@@ -433,8 +745,12 @@ async def daedalus_profiles(ctx: Context) -> str:
     """
     dc = _get_ctx(ctx)
     profs = dc.profiles.list()
-    return json.dumps([{"name": p.name, "description": p.description}
-                       for p in profs])
+    return json.dumps([{
+        "name": p.name, "description": p.description,
+        "kernel": p.kernel, "no_dns": p.no_dns,
+        "dns": p.dns, "dns_domain": p.dns_domain,
+        "tmpfs": p.tmpfs, "cpus": p.cpus, "memory": p.memory,
+    } for p in profs])
 
 
 # ==========================================================================

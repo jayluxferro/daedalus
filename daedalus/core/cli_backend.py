@@ -293,6 +293,7 @@ class CliBackend(Backend):
         cmd = ["exec", container_id]
         if tty:
             cmd.append("--tty")
+            cmd.append("--interactive")
         if user:
             cmd += ["--user", user]
         if uid is not None:
@@ -472,6 +473,10 @@ class CliBackend(Backend):
             cmd += ["--arch", arch]
         await _run_cli_impl(*cmd, binary=self._binary)
 
+    async def system_kernel_list(self) -> list[dict[str, Any]]:
+        """Return registered kernel variants from the in-process ariadne registry."""
+        return []
+
     async def system_dns_create(self, domain: str) -> None:
         await _run_cli_impl("system", "dns", "create", domain, binary=self._binary)
 
@@ -488,10 +493,27 @@ class CliBackend(Backend):
         """Disk usage — OS-level fallback since ``container system df``
         does not exist in v0.1.0.
         """
-        data_dir = os.path.expanduser("~/.container")
+        candidates = [
+            os.path.expanduser("~/Library/Application Support/com.apple.container"),
+            os.path.expanduser("~/.container"),
+            os.path.expanduser("~/.daedalus"),
+        ]
+        for data_dir in candidates:
+            if not os.path.isdir(data_dir):
+                continue
+            try:
+                usage = shutil.disk_usage(data_dir)
+                return {
+                    "total": usage.total, "used": usage.used, "free": usage.free,
+                    "path": data_dir,
+                }
+            except Exception:
+                continue
         try:
-            usage = shutil.disk_usage(data_dir)
-            return {"total": usage.total, "used": usage.used, "free": usage.free,
-                    "path": data_dir}
+            usage = shutil.disk_usage(os.path.expanduser("~"))
+            return {
+                "total": usage.total, "used": usage.used, "free": usage.free,
+                "path": "~", "note": "home volume (container data path not found)",
+            }
         except Exception:
             return {"error": "could not determine disk usage"}

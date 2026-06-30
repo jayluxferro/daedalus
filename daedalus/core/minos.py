@@ -260,11 +260,18 @@ class Minos:
             report.syscalls = self._summarize_syscalls(telemetry_data)
             report.network = self._summarize_network(telemetry_data)
 
-        # 4. Compute risk score
+        # 4. Boot / process log notes
+        log_findings: list[str] = []
+        if boot_log and boot_log.strip():
+            line_count = len([ln for ln in boot_log.splitlines() if ln.strip()])
+            if line_count:
+                log_findings.append(f"Captured {line_count} log lines from container output")
+
+        # 5. Compute risk score
         report.risk_score, report.risk_factors = self._score(report)
 
-        # 5. Generate findings
-        report.findings = self._generate_findings(report)
+        # 6. Generate findings
+        report.findings = self._generate_findings(report) + log_findings
 
         return report
 

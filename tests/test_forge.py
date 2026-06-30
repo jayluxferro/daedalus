@@ -16,6 +16,7 @@ from daedalus.core.capabilities import CapabilityManifest
 from daedalus.core.exceptions import PolicyViolationError, ValidationError
 from daedalus.core.forge import Forge, Labyrinth, SystemStatus
 from daedalus.core.policy import PolicyConfig, PolicyEngine
+from daedalus.core.store import Store
 
 # ------------------------------------------------------------------
 # Mock backend
@@ -28,6 +29,7 @@ class MockBackend(Backend):
     def __init__(self) -> None:
         self.containers: dict[str, ContainerInfo] = {}
         self.next_id = 1
+        self.last_spec: RunSpec | None = None
 
     def _cid(self) -> str:
         cid = f"mock-{self.next_id:04d}"
@@ -44,6 +46,7 @@ class MockBackend(Backend):
         return info
 
     async def run(self, spec: RunSpec) -> ContainerInfo:
+        self.last_spec = spec
         info = self._info(self._cid(), spec.name or "", spec.image, ContainerState.RUNNING)
         self.containers[info.id] = info
         return info
@@ -165,8 +168,8 @@ def caps() -> CapabilityManifest:
 
 
 @pytest.fixture
-def forge(caps: CapabilityManifest) -> Forge:
-    return Forge(MockBackend(), caps)
+def forge(caps: CapabilityManifest, tmp_path) -> Forge:
+    return Forge(MockBackend(), caps, store=Store(root=str(tmp_path / "store")))
 
 
 @pytest.fixture
@@ -257,6 +260,19 @@ class TestLifecycle:
     async def test_profile_tracking(self, forge: Forge):
         lab = await forge.run("alpine:latest", name="profiled", profile="detonation")
         assert lab.profile == "detonation"
+
+    async def test_run_injects_profile_label(self, forge: Forge):
+        await forge.run("alpine:latest", profile="bench")
+        spec = forge._backend.last_spec
+        assert spec is not None
+        assert spec.labels.get("daedalus.profile") == "bench"
+
+    async def test_external_container_profile(self, forge: Forge):
+        info = await forge._backend.run(RunSpec(image="alpine:latest"))
+        labs = await forge.list()
+        match = [lab for lab in labs if lab.id == info.id]
+        assert len(match) == 1
+        assert match[0].profile == "external"
 
 
 class TestPolicyIntegration:

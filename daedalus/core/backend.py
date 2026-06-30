@@ -523,6 +523,10 @@ class Backend(ABC):
         """Set the default kernel."""
         ...
 
+    async def system_kernel_list(self) -> list[dict[str, Any]]:
+        """List kernels available on the host.  Subclasses may override."""
+        return []
+
     @abstractmethod
     async def system_dns_create(self, domain: str) -> None:
         """Create a local DNS domain (requires sudo)."""

@@ -15,6 +15,7 @@ traffic policy.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 import yaml
 
@@ -151,11 +152,8 @@ class Talos:
     # ==================================================================
 
     @staticmethod
-    def load_topology(path: str) -> TopologyTemplate:
-        """Parse a topology template from a YAML file."""
-        with open(path) as f:
-            data = yaml.safe_load(f)
-
+    def parse_topology(data: dict[str, Any]) -> TopologyTemplate:
+        """Parse a topology template from a parsed YAML/JSON dict."""
         networks = [
             NetworkSpec(
                 name=n["name"],
@@ -192,3 +190,12 @@ class Talos:
             dns_entries=dns_entries,
             internal=data.get("internal", True),
         )
+
+    @staticmethod
+    def load_topology(path: str) -> TopologyTemplate:
+        """Parse a topology template from a YAML file."""
+        with open(path) as f:
+            data = yaml.safe_load(f)
+        if not isinstance(data, dict):
+            raise ValueError("topology file must contain a mapping")
+        return Talos.parse_topology(data)
