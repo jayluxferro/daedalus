@@ -1,0 +1,47 @@
+:root {
+  --bg: #09090b;
+  --fg: #fafafa;
+  --muted: #27272a;
+  --muted-fg: #a1a1aa;
+  --border: #27272a;
+  --accent: #3b82f6;
+  --accent-fg: #eff6ff;
+  --danger: #ef4444;
+  --danger-fg: #fef2f2;
+  --success: #22c55e;
+  --success-fg: #f0fdf4;
+  --warning: #f59e0b;
+  --warning-fg: #fffbeb;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+  border-color: var(--border);
+}
+
+html, body, #root {
+  height: 100%;
+  width: 100%;
+}
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: 'Inter', -apple-system, sans-serif;
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+.xterm-viewport::-webkit-scrollbar {
+  width: 6px;
+}
+.xterm-viewport::-webkit-scrollbar-thumb {
+  background: #374151;
+  border-radius: 3px;
+}
+.xterm-viewport::-webkit-scrollbar-track {
+  background: #1f2937;
+}
