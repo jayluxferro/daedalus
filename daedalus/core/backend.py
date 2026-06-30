@@ -41,7 +41,7 @@ class RunSpec:
     This matches the flags confirmed present in container v0.1.0 via
     ``container run --help`` / ``container create --help``.  Flags that
     don't exist yet (rosetta, virtualization, shm-size, ulimit, publish,
-    publish-socket, network, cap-add/cap-drop, init-image, dns-option)
+    publish-socket, network, cap-add/cap-drop, init-image)
     are intentionally absent — they will be added when the CLI supports
     them.
     """
@@ -49,7 +49,7 @@ class RunSpec:
     image: str
     name: str | None = None
     detach: bool = False
-    remove: bool = True  # --rm
+    remove: bool = False  # --rm (boolean flag; omit when False)
 
     # Execution environment
     workdir: str | None = None      # -w / --cwd / --workdir
@@ -77,7 +77,6 @@ class RunSpec:
     kernel: str | None = None       # -k / --kernel
 
     # Identity
-    hostname: str | None = None     # --hostname
     labels: dict[str, str] = field(default_factory=dict)  # -l / --label
     cidfile: str | None = None      # --cidfile
 
@@ -89,6 +88,7 @@ class RunSpec:
     dns: list[str] = field(default_factory=list)          # --dns
     dns_domain: list[str] = field(default_factory=list)   # --dns-domain
     dns_search: list[str] = field(default_factory=list)   # --dns-search
+    dns_option: list[str] = field(default_factory=list)   # --dns-option
     no_dns: bool = False            # --no-dns
 
     # Registry
@@ -111,13 +111,13 @@ class RunSpec:
         if self.name:
             flags += ["--name", self.name]
 
-        # --- detach (run only, not create) ---
-        if self.detach and not for_create:
+        # --- detach ---
+        if self.detach:
             flags.append("-d")
 
-        # --- rm ---
-        if not self.remove:
-            flags.append("--rm=false")
+        # --- rm (boolean flag; no value) ---
+        if self.remove:
+            flags.append("--rm")
 
         # --- workdir ---
         if self.workdir:
@@ -166,8 +166,6 @@ class RunSpec:
             flags += ["--kernel", self.kernel]
 
         # --- identity ---
-        if self.hostname:
-            flags += ["--hostname", self.hostname]
         for k, v in self.labels.items():
             flags += ["--label", f"{k}={v}"]
         if self.cidfile:
@@ -186,6 +184,8 @@ class RunSpec:
             flags += ["--dns-domain", d]
         for d in self.dns_search:
             flags += ["--dns-search", d]
+        for d in self.dns_option:
+            flags += ["--dns-option", d]
         if self.no_dns:
             flags.append("--no-dns")
 
@@ -340,12 +340,24 @@ class Backend(ABC):
         ...
 
     @abstractmethod
-    async def start(self, container_id: str) -> None:
+    async def start(
+        self,
+        container_id: str,
+        *,
+        attach: bool = False,
+        interactive: bool = False,
+    ) -> None:
         """Start a stopped container."""
         ...
 
     @abstractmethod
-    async def stop(self, container_id: str, timeout: int = 10) -> None:
+    async def stop(
+        self,
+        container_id: str,
+        timeout: int = 10,
+        *,
+        signal: str | None = None,
+    ) -> None:
         """Stop a running container with ``SIGTERM`` + timeout."""
         ...
 
@@ -394,6 +406,7 @@ class Backend(ABC):
         uid: int | None = None,
         gid: int | None = None,
         tty: bool = False,
+        interactive: bool = False,
         workdir: str | None = None,
         env_file: str | None = None,
     ) -> ExecResult:
@@ -403,12 +416,22 @@ class Backend(ABC):
     # -- images (all present in v0.1.0) ------------------------------------
 
     @abstractmethod
-    async def image_pull(self, image: str, platform: str | None = None) -> None:
+    async def image_pull(
+        self,
+        image: str,
+        platform: str | None = None,
+        scheme: str | None = None,
+    ) -> None:
         """Pull an image from a registry."""
         ...
 
     @abstractmethod
-    async def image_push(self, image: str) -> None:
+    async def image_push(
+        self,
+        image: str,
+        platform: str | None = None,
+        scheme: str | None = None,
+    ) -> None:
         """Push an image to a registry."""
         ...
 
@@ -428,7 +451,7 @@ class Backend(ABC):
         ...
 
     @abstractmethod
-    async def image_delete(self, image: str, force: bool = False) -> None:
+    async def image_delete(self, image: str, *, all: bool = False) -> None:
         """Remove one or more images."""
         ...
 
@@ -458,14 +481,34 @@ class Backend(ABC):
     # -- registry ----------------------------------------------------------
 
     @abstractmethod
-    async def registry_login(self, server: str, username: str | None = None,
-                             password: str | None = None) -> None:
+    async def registry_login(
+        self,
+        server: str,
+        username: str | None = None,
+        password: str | None = None,
+        scheme: str | None = None,
+    ) -> None:
         """Login to a registry."""
         ...
 
     @abstractmethod
     async def registry_logout(self, server: str) -> None:
         """Log out from a registry."""
+        ...
+
+    @abstractmethod
+    async def registry_default_inspect(self) -> str:
+        """Return the configured default registry host."""
+        ...
+
+    @abstractmethod
+    async def registry_default_set(self, host: str, scheme: str | None = None) -> None:
+        """Set the default registry host."""
+        ...
+
+    @abstractmethod
+    async def registry_default_unset(self) -> None:
+        """Clear the default registry host."""
         ...
 
     # -- builder -----------------------------------------------------------

@@ -27,6 +27,7 @@ class ExecOptions:
     uid: int | None = None
     gid: int | None = None
     tty: bool = False
+    interactive: bool = False
     workdir: str | None = None
     env: dict[str, str] | None = None
     env_file: str | None = None
@@ -85,6 +86,7 @@ class Icarus:
             uid=opts.uid,
             gid=opts.gid,
             tty=opts.tty,
+            interactive=opts.interactive,
             workdir=opts.workdir,
             env_file=opts.env_file,
         )

@@ -15,9 +15,11 @@ the backend.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import Any
 
 from daedalus.core.exceptions import PolicyViolationError
 
@@ -39,7 +41,9 @@ class PolicyConfig:
     """User-configurable policy parameters."""
 
     max_concurrent_vms: int = 16
-    max_disk_bytes: int = 100 * 1024 * 1024 * 1024  # 100 GiB
+    # Cap on Apple container *store* size (not whole-volume used bytes).
+    max_disk_bytes: int = 100 * 1024 * 1024 * 1024  # 100 GiB; 0 = disabled
+    min_free_bytes: int = 5 * 1024 * 1024 * 1024  # require 5 GiB free on volume
     egress_default: Decision = Decision.DENY
     image_allowlist: list[str] = field(default_factory=list)
     image_blocklist: list[str] = field(default_factory=list)
@@ -74,12 +78,32 @@ class PolicyEngine:
             )
         return PolicyResult(Decision.ALLOW)
 
-    def check_disk(self, current_disk_used: int) -> PolicyResult:
-        if current_disk_used >= self.config.max_disk_bytes:
+    def check_disk(self, disk: int | dict[str, Any]) -> PolicyResult:
+        """Check disk policy against container store size and volume free space."""
+        if isinstance(disk, int):
+            store_bytes: int | None = disk
+            free_bytes: int | None = None
+        else:
+            store_bytes = disk.get("store_bytes")
+            if not isinstance(store_bytes, int):
+                store_bytes = None
+            free_bytes = disk.get("free")
+            if not isinstance(free_bytes, int):
+                free_bytes = None
+
+        if free_bytes is not None and free_bytes < self.config.min_free_bytes:
             return PolicyResult(
                 Decision.DENY,
-                f"Disk budget exceeded "
-                f"({current_disk_used} >= {self.config.max_disk_bytes})",
+                f"Insufficient free disk space "
+                f"({free_bytes} < {self.config.min_free_bytes})",
+            )
+
+        cap = self.config.max_disk_bytes
+        if cap > 0 and store_bytes is not None and store_bytes >= cap:
+            return PolicyResult(
+                Decision.DENY,
+                f"Container store budget exceeded "
+                f"({store_bytes} >= {cap})",
             )
         return PolicyResult(Decision.ALLOW)
 
@@ -150,3 +174,16 @@ class PolicyEngine:
     def log(self, operation: str, actor: str, result: PolicyResult) -> None:
         if self.config.on_decision:
             self.config.on_decision(operation, actor, result)
+
+
+def load_policy_config() -> PolicyConfig:
+    """Build policy config from environment overrides."""
+    cfg = PolicyConfig()
+    if raw := os.environ.get("DAEDALUS_MAX_DISK_GIB"):
+        gib = int(raw)
+        cfg.max_disk_bytes = 0 if gib <= 0 else gib * 1024**3
+    if raw := os.environ.get("DAEDALUS_MIN_FREE_GIB"):
+        cfg.min_free_bytes = int(raw) * 1024**3
+    if raw := os.environ.get("DAEDALUS_MAX_CONCURRENT_VMS"):
+        cfg.max_concurrent_vms = int(raw)
+    return cfg

@@ -190,13 +190,31 @@ class CliBackend(Backend):
             state=ContainerState.RUNNING, raw={"id": cid},
         )
 
-    async def start(self, container_id: str) -> None:
-        await _run_cli_impl("start", container_id, binary=self._binary)
+    async def start(
+        self,
+        container_id: str,
+        *,
+        attach: bool = False,
+        interactive: bool = False,
+    ) -> None:
+        cmd = ["start", container_id]
+        if attach:
+            cmd.append("--attach")
+        if interactive:
+            cmd.append("--interactive")
+        await _run_cli_impl(*cmd, binary=self._binary)
 
-    async def stop(self, container_id: str, timeout: int = 10) -> None:
-        await _run_cli_impl(
-            "stop", container_id, "-t", str(timeout), binary=self._binary,
-        )
+    async def stop(
+        self,
+        container_id: str,
+        timeout: int = 10,
+        *,
+        signal: str | None = None,
+    ) -> None:
+        cmd = ["stop", container_id, "-t", str(timeout)]
+        if signal:
+            cmd += ["--signal", signal]
+        await _run_cli_impl(*cmd, binary=self._binary)
 
     async def kill(self, container_id: str, signal: str = "KILL") -> None:
         if signal != "KILL":
@@ -289,10 +307,12 @@ class CliBackend(Backend):
         tty: bool = False,
         workdir: str | None = None,
         env_file: str | None = None,
+        interactive: bool = False,
     ) -> ExecResult:
         cmd = ["exec", container_id]
         if tty:
             cmd.append("--tty")
+        if interactive or tty:
             cmd.append("--interactive")
         if user:
             cmd += ["--user", user]
@@ -320,14 +340,31 @@ class CliBackend(Backend):
     # Images
     # ==================================================================
 
-    async def image_pull(self, image: str, platform: str | None = None) -> None:
+    async def image_pull(
+        self,
+        image: str,
+        platform: str | None = None,
+        scheme: str | None = None,
+    ) -> None:
         cmd = ["image", "pull", image]
+        if scheme:
+            cmd += ["--scheme", scheme]
         if platform:
             cmd += ["--platform", platform]
         await _run_cli_impl(*cmd, binary=self._binary)
 
-    async def image_push(self, image: str) -> None:
-        await _run_cli_impl("image", "push", image, binary=self._binary)
+    async def image_push(
+        self,
+        image: str,
+        platform: str | None = None,
+        scheme: str | None = None,
+    ) -> None:
+        cmd = ["image", "push", image]
+        if scheme:
+            cmd += ["--scheme", scheme]
+        if platform:
+            cmd += ["--platform", platform]
+        await _run_cli_impl(*cmd, binary=self._binary)
 
     async def image_save(self, image: str, output: str) -> str:
         await _run_cli_impl(
@@ -344,10 +381,10 @@ class CliBackend(Backend):
     async def image_tag(self, source: str, target: str) -> None:
         await _run_cli_impl("image", "tag", source, target, binary=self._binary)
 
-    async def image_delete(self, image: str, force: bool = False) -> None:
+    async def image_delete(self, image: str, *, all: bool = False) -> None:
         cmd = ["image", "delete", image]
-        if force:
-            cmd.append("--force")
+        if all:
+            cmd.append("--all")
         await _run_cli_impl(*cmd, binary=self._binary)
 
     async def image_inspect(self, image: str) -> dict[str, Any]:
@@ -395,12 +432,17 @@ class CliBackend(Backend):
     # ==================================================================
 
     async def registry_login(
-        self, server: str, username: str | None = None,
+        self,
+        server: str,
+        username: str | None = None,
         password: str | None = None,
+        scheme: str | None = None,
     ) -> None:
         cmd = ["registry", "login"]
         if username:
             cmd += ["--username", username]
+        if scheme:
+            cmd += ["--scheme", scheme]
         if password is not None:
             cmd.append("--password-stdin")
         cmd.append(server)
@@ -423,6 +465,22 @@ class CliBackend(Backend):
 
     async def registry_logout(self, server: str) -> None:
         await _run_cli_impl("registry", "logout", server, binary=self._binary)
+
+    async def registry_default_inspect(self) -> str:
+        _, out, _ = await _run_cli_impl(
+            "registry", "default", "inspect", binary=self._binary,
+        )
+        return out.strip()
+
+    async def registry_default_set(self, host: str, scheme: str | None = None) -> None:
+        cmd = ["registry", "default", "set"]
+        if scheme:
+            cmd += ["--scheme", scheme]
+        cmd.append(host)
+        await _run_cli_impl(*cmd, binary=self._binary)
+
+    async def registry_default_unset(self) -> None:
+        await _run_cli_impl("registry", "default", "unset", binary=self._binary)
 
     # ==================================================================
     # Builder
@@ -507,6 +565,11 @@ class CliBackend(Backend):
     async def system_df(self) -> dict[str, Any]:
         """Disk usage — OS-level fallback since ``container system df``
         does not exist in v0.1.0.
+
+        Returns volume stats plus ``store_bytes``: actual size of the Apple
+        container data directory (used for policy checks).  ``used`` is the
+        whole-volume figure from ``shutil.disk_usage`` and is *not* compared
+        against the container store budget.
         """
         candidates = [
             os.path.expanduser("~/Library/Application Support/com.apple.container"),
@@ -518,17 +581,41 @@ class CliBackend(Backend):
                 continue
             try:
                 usage = shutil.disk_usage(data_dir)
+                store_bytes = await self._store_bytes(data_dir)
                 return {
-                    "total": usage.total, "used": usage.used, "free": usage.free,
+                    "total": usage.total,
+                    "used": usage.used,
+                    "free": usage.free,
                     "path": data_dir,
+                    "store_bytes": store_bytes,
                 }
             except Exception:
                 continue
         try:
-            usage = shutil.disk_usage(os.path.expanduser("~"))
+            home = os.path.expanduser("~")
+            usage = shutil.disk_usage(home)
             return {
-                "total": usage.total, "used": usage.used, "free": usage.free,
-                "path": "~", "note": "home volume (container data path not found)",
+                "total": usage.total,
+                "used": usage.used,
+                "free": usage.free,
+                "path": "~",
+                "note": "home volume (container data path not found)",
             }
         except Exception:
             return {"error": "could not determine disk usage"}
+
+    async def _store_bytes(self, path: str) -> int | None:
+        """Best-effort size of a directory tree (KiB blocks from ``du``)."""
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "du", "-sk", path,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=120.0)
+            if proc.returncode == 0 and stdout:
+                kib = int(stdout.decode().split()[0])
+                return kib * 1024
+        except Exception:
+            pass
+        return None

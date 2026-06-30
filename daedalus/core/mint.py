@@ -72,9 +72,14 @@ class Mint:
     # Pull / Push
     # ==================================================================
 
-    async def pull(self, image: str, platform: str | None = None) -> ImageInfo:
+    async def pull(
+        self,
+        image: str,
+        platform: str | None = None,
+        scheme: str | None = None,
+    ) -> ImageInfo:
         """Pull an image from a registry."""
-        await self._backend.image_pull(image, platform=platform)
+        await self._backend.image_pull(image, platform=platform, scheme=scheme)
         info = await self._backend.image_inspect(image)
         # container v0.1.0 OCI index format: {"name": "...", "index": {"digest": "...", "size": ...}}
         img_name = info.get("name", image)
@@ -97,9 +102,14 @@ class Mint:
         )
         return img
 
-    async def push(self, image: str) -> None:
+    async def push(
+        self,
+        image: str,
+        platform: str | None = None,
+        scheme: str | None = None,
+    ) -> None:
         """Push an image to a registry."""
-        await self._backend.image_push(image)
+        await self._backend.image_push(image, platform=platform, scheme=scheme)
         self._audit.record(
             "push", actor="mint", actor_kind=ActorKind.SERVICE,
             args={"image": image},
@@ -147,14 +157,14 @@ class Mint:
             args={"source": source, "target": target},
         )
 
-    async def delete(self, image: str, force: bool = False) -> None:
-        await self._backend.image_delete(image, force=force)
+    async def delete(self, image: str, *, all: bool = False) -> None:
+        await self._backend.image_delete(image, all=all)
         to_remove = [k for k, v in self._inventory.items() if v.name == image]
         for k in to_remove:
             del self._inventory[k]
         self._audit.record(
             "image_delete", actor="mint", actor_kind=ActorKind.SERVICE,
-            args={"image": image, "force": force},
+            args={"image": image, "all": all},
         )
 
     async def inspect(self, image: str) -> ImageInfo:

@@ -32,10 +32,10 @@ export function useRunContainer() {
   return useMutation({
     mutationFn: (body: {
       image: string; name?: string; profile?: string;
-      detach?: boolean; command?: string[];
+      start?: boolean; detach?: boolean; remove?: boolean; command?: string[];
       kernel?: string; cpus?: number; memory?: string; dns?: string[];
       volumes?: string[]; mounts?: string[];
-      env?: Record<string, string>; workdir?: string; hostname?: string;
+      env?: Record<string, string>; workdir?: string;
       confirm_kernel?: boolean;
     }) => apiPost<ContainerInfo>('/containers', body),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['containers'] }),

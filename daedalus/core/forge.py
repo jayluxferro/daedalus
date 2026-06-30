@@ -23,6 +23,9 @@ from daedalus.core.capabilities import CapabilityManifest
 from daedalus.core.exceptions import ValidationError
 from daedalus.core.minos import Minos
 from daedalus.core.network import has_network_addresses
+
+# Detached with no command: image defaults exit immediately in the background.
+DEFAULT_DETACHED_COMMAND: list[str] = ["sleep", "infinity"]
 from daedalus.core.policy import Decision, PolicyEngine
 from daedalus.core.store import Artifact, Store
 
@@ -143,13 +146,16 @@ class Forge:
         *,
         name: str | None = None,
         profile: str = "default",
+        command: list[str] | None = None,
         confirm_kernel: bool = False,
         **kwargs: Any,
     ) -> Labyrinth:
         """Create a container (does not start it)."""
         await self._check_run(image, confirm_kernel=confirm_kernel, **kwargs)
+        if not command:
+            command = list(DEFAULT_DETACHED_COMMAND)
         spec = RunSpec(
-            image=image, name=name,
+            image=image, name=name, command=command,
             **_filter_run_kwargs(_with_profile_label(kwargs, profile)),
         )
         info = await self._backend.create(spec)
@@ -175,6 +181,8 @@ class Forge:
     ) -> Labyrinth:
         """Create and start a container."""
         await self._check_run(image, confirm_kernel=confirm_kernel, **kwargs)
+        if not command:
+            command = list(DEFAULT_DETACHED_COMMAND)
         spec = RunSpec(
             image=image, name=name, detach=detach, command=command,
             **_filter_run_kwargs(_with_profile_label(kwargs, profile)),
@@ -193,8 +201,16 @@ class Forge:
         )
         return lab
 
-    async def start(self, container_id: str) -> Labyrinth:
-        await self._backend.start(container_id)
+    async def start(
+        self,
+        container_id: str,
+        *,
+        attach: bool = False,
+        interactive: bool = False,
+    ) -> Labyrinth:
+        await self._backend.start(
+            container_id, attach=attach, interactive=interactive,
+        )
         lab = await self._refresh(container_id)
         self._audit.record(
             "start", actor="forge", actor_kind=ActorKind.SERVICE,
@@ -203,8 +219,14 @@ class Forge:
         )
         return lab
 
-    async def stop(self, container_id: str, timeout: int = 10) -> Labyrinth:
-        await self._backend.stop(container_id, timeout=timeout)
+    async def stop(
+        self,
+        container_id: str,
+        timeout: int = 10,
+        *,
+        signal: str | None = None,
+    ) -> Labyrinth:
+        await self._backend.stop(container_id, timeout=timeout, signal=signal)
         lab = await self._refresh(container_id)
         self._audit.record(
             "stop", actor="forge", actor_kind=ActorKind.SERVICE,
@@ -384,11 +406,9 @@ class Forge:
         self._policy.enforce(r)
 
         disk = await self._backend.system_df()
-        used = disk.get("used")
-        if isinstance(used, int):
-            r = self._policy.check_disk(used)
-            self._policy.log("check_disk", "forge", r)
-            self._policy.enforce(r)
+        r = self._policy.check_disk(disk)
+        self._policy.log("check_disk", "forge", r)
+        self._policy.enforce(r)
 
         kernel = kwargs.get("kernel")
         if kernel:
@@ -415,8 +435,8 @@ def _now() -> str:
 _RUNSPEC_FIELDS = {
     "image", "name", "detach", "remove", "workdir", "env", "env_file",
     "entrypoint", "user", "uid", "gid", "interactive", "tty", "cpus",
-    "memory", "mounts", "tmpfs", "volumes", "kernel", "hostname", "labels",
-    "cidfile", "os", "arch", "dns", "dns_domain", "dns_search", "no_dns",
+    "memory", "mounts", "tmpfs", "volumes", "kernel", "labels",
+    "cidfile", "os", "arch", "dns", "dns_domain", "dns_search", "dns_option", "no_dns",
     "scheme", "disable_progress_updates", "command",
 }
 

@@ -91,13 +91,28 @@ class TestPolicy:
 
     def test_disk_allow(self):
         engine = PolicyEngine()
-        r = engine.check_disk(1024)
+        r = engine.check_disk({"store_bytes": 1024, "free": 10 * 1024**3})
         assert r.decision == Decision.ALLOW
 
-    def test_disk_deny(self):
+    def test_disk_deny_store(self):
         engine = PolicyEngine(PolicyConfig(max_disk_bytes=1000))
-        r = engine.check_disk(1000)
+        r = engine.check_disk({"store_bytes": 1000, "free": 10 * 1024**3})
         assert r.decision == Decision.DENY
+
+    def test_disk_deny_low_free(self):
+        engine = PolicyEngine(PolicyConfig(min_free_bytes=1000))
+        r = engine.check_disk({"store_bytes": 100, "free": 500})
+        assert r.decision == Decision.DENY
+
+    def test_disk_ignores_volume_used(self):
+        """Whole-volume used bytes must not trip the store budget."""
+        engine = PolicyEngine(PolicyConfig(max_disk_bytes=100 * 1024**3))
+        r = engine.check_disk({
+            "used": 500 * 1024**3,
+            "store_bytes": 1024,
+            "free": 50 * 1024**3,
+        })
+        assert r.decision == Decision.ALLOW
 
     def test_image_blocklist(self):
         engine = PolicyEngine(PolicyConfig(image_blocklist=["malicious"]))

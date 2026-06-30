@@ -20,7 +20,7 @@ from daedalus.core.forge import Forge
 from daedalus.core.icarus import ExecOptions, Icarus
 from daedalus.core.mint import Mint
 from daedalus.core.network import network_names, primary_ip
-from daedalus.core.policy import PolicyEngine, PolicyResult
+from daedalus.core.policy import PolicyEngine, PolicyResult, load_policy_config
 from daedalus.core.profiles import ProfileRegistry
 from daedalus.core.store import Store
 
@@ -48,7 +48,7 @@ def _bootstrap() -> None:
     backend = CliBackend(_caps)
     audit = AuditLog()
     store = Store()
-    policy = PolicyEngine()
+    policy = PolicyEngine(load_policy_config())
 
     def _policy_audit(operation: str, actor: str, result: PolicyResult) -> None:
         audit.record(
@@ -106,6 +106,49 @@ def probe_cmd() -> None:
 
 
 @app.command()
+def create(
+    image: str,
+    name: Annotated[str | None, typer.Option("--name")] = None,
+    profile: Annotated[str, typer.Option("--profile", "-p")] = "detonation",
+    kernel: Annotated[str | None, typer.Option("--kernel", "-k")] = None,
+    confirm_kernel: Annotated[bool, typer.Option("--confirm-kernel")] = False,
+    command: Annotated[str | None, typer.Option("--command", "-c")] = None,
+    volume: Annotated[list[str], typer.Option("--volume", "-v", help="Bind mount host:container")] = [],
+    mount: Annotated[list[str], typer.Option("--mount", help="Mount spec type=,source=,target=")] = [],
+    env: Annotated[list[str], typer.Option("--env", "-e", help="KEY=VALUE")] = [],
+    workdir: Annotated[str | None, typer.Option("--workdir", "-w")] = None,
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Create a container without starting it."""
+    _bootstrap()
+    p = _p().get(profile)
+    kwargs = p.apply()
+    if kernel:
+        kwargs["kernel"] = kernel
+    if volume:
+        kwargs["volumes"] = volume
+    if mount:
+        kwargs["mounts"] = mount
+    if env:
+        kwargs["env"] = dict(e.split("=", 1) for e in env if "=" in e)
+    if workdir:
+        kwargs["workdir"] = workdir
+    cmd_list = command.split() if command else None
+
+    async def _go() -> None:
+        lab = await _f().create(
+            image, name=name, profile=profile,
+            command=cmd_list, confirm_kernel=confirm_kernel, **kwargs,
+        )
+        if json_output:
+            console.print(json.dumps(lab.info.raw, indent=2))
+        else:
+            console.print(f"[green]✓[/] Created [bold]{lab.id[:12]}[/] (stopped)")
+            console.print(f"  Start with: daedalus start {lab.id[:12]}")
+    asyncio.run(_go())
+
+
+@app.command()
 def run(
     image: str,
     name: Annotated[str | None, typer.Option("--name")] = None,
@@ -118,7 +161,6 @@ def run(
     mount: Annotated[list[str], typer.Option("--mount", help="Mount spec type=,source=,target=")] = [],
     env: Annotated[list[str], typer.Option("--env", "-e", help="KEY=VALUE")] = [],
     workdir: Annotated[str | None, typer.Option("--workdir", "-w")] = None,
-    hostname: Annotated[str | None, typer.Option("--hostname")] = None,
     json_output: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:
     """Create and start a container."""
@@ -135,8 +177,6 @@ def run(
         kwargs["env"] = dict(e.split("=", 1) for e in env if "=" in e)
     if workdir:
         kwargs["workdir"] = workdir
-    if hostname:
-        kwargs["hostname"] = hostname
     cmd_list = command.split() if command else None
 
     async def _go() -> None:
@@ -195,21 +235,31 @@ def inspect(container_id: str) -> None:
 
 
 @app.command()
-def start(container_id: str) -> None:
+def start(
+    container_id: str,
+    attach: Annotated[bool, typer.Option("--attach", "-a")] = False,
+    interactive: Annotated[bool, typer.Option("--interactive", "-i")] = False,
+) -> None:
     """Start a stopped container."""
     _bootstrap()
     async def _go() -> None:
-        lab = await _f().start(container_id)
+        lab = await _f().start(
+            container_id, attach=attach, interactive=interactive,
+        )
         console.print(f"[green]✓[/] Started [bold]{lab.id[:12]}[/] — {lab.state}")
     asyncio.run(_go())
 
 
 @app.command()
-def stop(container_id: str) -> None:
+def stop(
+    container_id: str,
+    timeout: Annotated[int, typer.Option("-t", "--timeout")] = 10,
+    signal: Annotated[str | None, typer.Option("--signal", "-s")] = None,
+) -> None:
     """Stop a running container."""
     _bootstrap()
     async def _go() -> None:
-        lab = await _f().stop(container_id)
+        lab = await _f().stop(container_id, timeout=timeout, signal=signal)
         console.print(f"[yellow]■[/] Stopped [bold]{lab.id[:12]}[/] — {lab.state}")
     asyncio.run(_go())
 
@@ -250,13 +300,20 @@ def exec_(
     container_id: str,
     command: Annotated[list[str], typer.Argument(help="Command to execute")],
     user: Annotated[str | None, typer.Option("--user", "-u")] = None,
+    uid: Annotated[int | None, typer.Option("--uid")] = None,
+    gid: Annotated[int | None, typer.Option("--gid")] = None,
     workdir: Annotated[str | None, typer.Option("--workdir", "-w")] = None,
+    env_file: Annotated[str | None, typer.Option("--env-file")] = None,
     tty: Annotated[bool, typer.Option("--tty", "-t")] = False,
+    interactive: Annotated[bool, typer.Option("--interactive", "-i")] = False,
 ) -> None:
     """Execute a command inside a running container."""
     _bootstrap()
     async def _go() -> None:
-        opts = ExecOptions(user=user, workdir=workdir, tty=tty)
+        opts = ExecOptions(
+            user=user, uid=uid, gid=gid, workdir=workdir,
+            env_file=env_file, tty=tty, interactive=interactive,
+        )
         result = await _i().exec(container_id, list(command), options=opts)
         if result.stdout:
             console.print(result.stdout)
@@ -287,21 +344,29 @@ def logs(
 
 
 @app.command("image-pull")
-def image_pull(image: str) -> None:
+def image_pull(
+    image: str,
+    platform: Annotated[str | None, typer.Option("--platform")] = None,
+    scheme: Annotated[str | None, typer.Option("--scheme")] = None,
+) -> None:
     """Pull an image from a registry."""
     _bootstrap()
     async def _go() -> None:
-        await _m().pull(image)
+        await _m().pull(image, platform=platform, scheme=scheme)
         console.print(f"[green]✓[/] Pulled {image}")
     asyncio.run(_go())
 
 
 @app.command("image-push")
-def image_push(image: str) -> None:
+def image_push(
+    image: str,
+    platform: Annotated[str | None, typer.Option("--platform")] = None,
+    scheme: Annotated[str | None, typer.Option("--scheme")] = None,
+) -> None:
     """Push an image to a registry."""
     _bootstrap()
     async def _go() -> None:
-        await _m().push(image)
+        await _m().push(image, platform=platform, scheme=scheme)
         console.print(f"[green]✓[/] Pushed {image}")
     asyncio.run(_go())
 
@@ -339,11 +404,11 @@ def image_list() -> None:
 
 
 @app.command("image-delete")
-def image_delete(image: str, force: Annotated[bool, typer.Option("--force")] = False) -> None:
+def image_delete(image: str, all: Annotated[bool, typer.Option("--all")] = False) -> None:
     """Delete a local image."""
     _bootstrap()
     async def _go() -> None:
-        await _m().delete(image, force=force)
+        await _m().delete(image, all=all)
         console.print(f"[red]✗[/] Deleted image {image}")
     asyncio.run(_go())
 
@@ -421,11 +486,14 @@ def registry_login(
     server: str,
     username: Annotated[str | None, typer.Option("-u", "--username")] = None,
     password: Annotated[str | None, typer.Option("-p", "--password", hide_input=True)] = None,
+    scheme: Annotated[str | None, typer.Option("--scheme")] = None,
 ) -> None:
     """Login to a container registry."""
     _bootstrap()
     async def _go() -> None:
-        await _f().backend.registry_login(server, username=username, password=password)
+        await _f().backend.registry_login(
+            server, username=username, password=password, scheme=scheme,
+        )
         console.print(f"[green]✓[/] Logged in to {server}")
     asyncio.run(_go())
 
@@ -437,6 +505,39 @@ def registry_logout(server: str) -> None:
     async def _go() -> None:
         await _f().backend.registry_logout(server)
         console.print(f"[green]✓[/] Logged out from {server}")
+    asyncio.run(_go())
+
+
+@app.command("registry-default-inspect")
+def registry_default_inspect() -> None:
+    """Show the configured default registry host."""
+    _bootstrap()
+    async def _go() -> None:
+        host = await _f().backend.registry_default_inspect()
+        console.print(host or "[dim](none)[/]")
+    asyncio.run(_go())
+
+
+@app.command("registry-default-set")
+def registry_default_set(
+    host: str,
+    scheme: Annotated[str | None, typer.Option("--scheme")] = None,
+) -> None:
+    """Set the default registry host."""
+    _bootstrap()
+    async def _go() -> None:
+        await _f().backend.registry_default_set(host, scheme=scheme)
+        console.print(f"[green]✓[/] Default registry set to {host}")
+    asyncio.run(_go())
+
+
+@app.command("registry-default-unset")
+def registry_default_unset() -> None:
+    """Clear the default registry host."""
+    _bootstrap()
+    async def _go() -> None:
+        await _f().backend.registry_default_unset()
+        console.print("[green]✓[/] Default registry cleared")
     asyncio.run(_go())
 
 
@@ -514,6 +615,67 @@ def builder_stop() -> None:
     async def _go() -> None:
         await _f().backend.builder_stop()
         console.print("[yellow]■[/] Builder stopped")
+    asyncio.run(_go())
+
+
+@app.command("builder-delete")
+def builder_delete(
+    force: Annotated[bool, typer.Option("--force")] = False,
+) -> None:
+    """Delete the image builder VM."""
+    _bootstrap()
+    async def _go() -> None:
+        await _f().backend.builder_delete(force=force)
+        console.print("[red]✗[/] Builder deleted")
+    asyncio.run(_go())
+
+
+@app.command("system-start")
+def system_start() -> None:
+    """Start container system services."""
+    _bootstrap()
+    async def _go() -> None:
+        await _f().backend.system_start()
+        console.print("[green]✓[/] Container system started")
+    asyncio.run(_go())
+
+
+@app.command("system-stop")
+def system_stop() -> None:
+    """Stop all container system services."""
+    _bootstrap()
+    async def _go() -> None:
+        await _f().backend.system_stop()
+        console.print("[yellow]■[/] Container system stopped")
+    asyncio.run(_go())
+
+
+@app.command("system-logs")
+def system_logs(
+    last: Annotated[str, typer.Option("--last", "-n")] = "5m",
+) -> None:
+    """Show container system logs."""
+    _bootstrap()
+    async def _go() -> None:
+        logs = await _f().backend.system_logs(last=last)
+        console.print(logs)
+    asyncio.run(_go())
+
+
+@app.command("system-kernel-set")
+def system_kernel_set(
+    binary: Annotated[str | None, typer.Option("--binary")] = None,
+    tar: Annotated[str | None, typer.Option("--tar")] = None,
+    arch: Annotated[str, typer.Option("--arch")] = "arm64",
+    recommended: Annotated[bool, typer.Option("--recommended")] = False,
+) -> None:
+    """Set the default container kernel."""
+    _bootstrap()
+    async def _go() -> None:
+        await _f().backend.system_kernel_set(
+            binary=binary, tar=tar, arch=arch, recommended=recommended,
+        )
+        console.print("[green]✓[/] Kernel set")
     asyncio.run(_go())
 
 

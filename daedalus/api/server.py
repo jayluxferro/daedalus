@@ -61,7 +61,7 @@ from daedalus.core.backend import BuildSpec
 from daedalus.core.forge import Forge
 from daedalus.core.icarus import ExecOptions, Icarus
 from daedalus.core.mint import Mint
-from daedalus.core.policy import PolicyEngine, PolicyResult
+from daedalus.core.policy import PolicyEngine, PolicyResult, load_policy_config
 from daedalus.core.profiles import ProfileRegistry
 from daedalus.core.store import Store
 from daedalus.core.talos import Talos
@@ -76,7 +76,9 @@ class RunRequest(BaseModel):
     image: str
     name: str | None = None
     profile: str = "detonation"
+    start: bool = True  # False = create only (stopped); True = create and run
     detach: bool = True
+    remove: bool = False  # keep container record unless caller opts into --rm
     command: list[str] | None = None
     kernel: str | None = None
     cpus: int | None = None
@@ -86,7 +88,6 @@ class RunRequest(BaseModel):
     mounts: list[str] | None = None
     env: dict[str, str] | None = None
     workdir: str | None = None
-    hostname: str | None = None
     confirm_kernel: bool = False
 
 
@@ -99,6 +100,19 @@ class RegistryLoginRequest(BaseModel):
     server: str
     username: str | None = None
     password: str | None = None
+    scheme: str | None = None
+
+
+class RegistryDefaultRequest(BaseModel):
+    host: str
+    scheme: str | None = None
+
+
+class SystemKernelSetRequest(BaseModel):
+    binary: str | None = None
+    tar: str | None = None
+    arch: str = "arm64"
+    recommended: bool = False
 
 
 def _container_dict(lab: Any) -> dict[str, Any]:
@@ -117,8 +131,13 @@ def _container_dict(lab: Any) -> dict[str, Any]:
 class ExecRequest(BaseModel):
     command: list[str]
     user: str | None = None
+    uid: int | None = None
+    gid: int | None = None
     workdir: str | None = None
     env: dict[str, str] | None = None
+    env_file: str | None = None
+    tty: bool = False
+    interactive: bool = False
 
 
 class BuildRequest(BaseModel):
@@ -153,7 +172,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     backend = CliBackend(caps)
     audit = AuditLog()
     store = Store()
-    policy = PolicyEngine()
+    policy = PolicyEngine(load_policy_config())
 
     def _policy_audit(operation: str, actor: str, result: PolicyResult) -> None:
         audit.record(
@@ -253,17 +272,26 @@ async def create_container(req: RunRequest) -> dict[str, Any]:
         overrides["env"] = req.env
     if req.workdir is not None:
         overrides["workdir"] = req.workdir
-    if req.hostname is not None:
-        overrides["hostname"] = req.hostname
+    overrides["remove"] = req.remove
     kwargs = p.apply(**overrides)
     forge: Any = s["forge"]
-    lab = await forge.run(
-        req.image, name=req.name, detach=req.detach,
-        profile=req.profile, command=req.command,
-        confirm_kernel=req.confirm_kernel, **kwargs,
-    )
-    s["audit"].record("run", actor="service", actor_kind=ActorKind.SERVICE,
-                      args={"image": req.image, "profile": req.profile})
+    run_kwargs = {
+        "name": req.name,
+        "profile": req.profile,
+        "command": req.command,
+        "confirm_kernel": req.confirm_kernel,
+        **kwargs,
+    }
+    if req.start:
+        lab = await forge.run(
+            req.image, detach=req.detach, **run_kwargs,
+        )
+        s["audit"].record("run", actor="service", actor_kind=ActorKind.SERVICE,
+                          args={"image": req.image, "profile": req.profile})
+    else:
+        lab = await forge.create(req.image, **run_kwargs)
+        s["audit"].record("create", actor="service", actor_kind=ActorKind.SERVICE,
+                          args={"image": req.image, "profile": req.profile})
     return _container_dict(lab)
 
 
@@ -278,11 +306,17 @@ async def inspect_container(container_id: str) -> dict[str, Any]:
 
 
 @app.post("/containers/{container_id}/start")
-async def start_container(container_id: str) -> dict[str, Any]:
+async def start_container(
+    container_id: str,
+    attach: bool = Query(False),
+    interactive: bool = Query(False),
+) -> dict[str, Any]:
     """Start a stopped container."""
     s = _get_state()
     try:
-        lab = await s["forge"].start(container_id)
+        lab = await s["forge"].start(
+            container_id, attach=attach, interactive=interactive,
+        )
         s["audit"].record("start", actor="service", actor_kind=ActorKind.SERVICE,
                           args={"container_id": container_id})
         return {"status": "started", "id": lab.id, "state": lab.state}
@@ -308,11 +342,15 @@ async def destroy_container(container_id: str, confirm: bool = Query(False)) -> 
 
 
 @app.post("/containers/{container_id}/stop")
-async def stop_container(container_id: str) -> dict[str, Any]:
+async def stop_container(
+    container_id: str,
+    timeout: int = Query(10),
+    signal: str | None = Query(None),
+) -> dict[str, Any]:
     """Stop a running container."""
     s = _get_state()
     try:
-        lab = await s["forge"].stop(container_id)
+        lab = await s["forge"].stop(container_id, timeout=timeout, signal=signal)
         s["audit"].record("stop", actor="service", actor_kind=ActorKind.SERVICE,
                           args={"container_id": container_id})
         return {"status": "stopped", "id": lab.id, "state": lab.state}
@@ -340,7 +378,16 @@ async def kill_container(
 async def container_exec(container_id: str, req: ExecRequest) -> dict[str, Any]:
     s = _get_state()
     try:
-        opts = ExecOptions(user=req.user, workdir=req.workdir, env=req.env)
+        opts = ExecOptions(
+            user=req.user,
+            uid=req.uid,
+            gid=req.gid,
+            workdir=req.workdir,
+            env=req.env,
+            env_file=req.env_file,
+            tty=req.tty,
+            interactive=req.interactive,
+        )
         result = await s["icarus"].exec(container_id, req.command, options=opts)
         return {"exit_code": result.exit_code, "stdout": result.stdout,
                 "stderr": result.stderr}
@@ -509,31 +556,39 @@ async def image_inspect(name: str) -> dict[str, Any]:
 
 
 @app.delete("/images/{name:path}")
-async def image_delete(name: str, force: bool = Query(False)) -> dict[str, Any]:
+async def image_delete(name: str, all: bool = Query(False)) -> dict[str, Any]:
     """Delete an image."""
     s = _get_state()
     try:
-        await s["mint"].delete(name, force=force)
+        await s["mint"].delete(name, all=all)
         return {"status": "deleted", "name": name}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @app.post("/images/pull")
-async def image_pull(image: str = Query(...)) -> dict[str, Any]:
+async def image_pull(
+    image: str = Query(...),
+    platform: str | None = Query(None),
+    scheme: str | None = Query(None),
+) -> dict[str, Any]:
     s = _get_state()
     try:
-        img = await s["mint"].pull(image)
+        img = await s["mint"].pull(image, platform=platform, scheme=scheme)
         return {"status": "pulled", "name": img.name, "id": img.id}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @app.post("/images/push")
-async def image_push(image: str = Query(...)) -> dict[str, Any]:
+async def image_push(
+    image: str = Query(...),
+    platform: str | None = Query(None),
+    scheme: str | None = Query(None),
+) -> dict[str, Any]:
     s = _get_state()
     try:
-        await s["mint"].push(image)
+        await s["mint"].push(image, platform=platform, scheme=scheme)
         s["audit"].record("image_push", actor="service", actor_kind=ActorKind.SERVICE,
                           args={"image": image})
         return {"status": "pushed", "name": image}
@@ -612,7 +667,10 @@ async def registry_login(req: RegistryLoginRequest) -> dict[str, Any]:
     s = _get_state()
     try:
         await s["backend"].registry_login(
-            req.server, username=req.username, password=req.password,
+            req.server,
+            username=req.username,
+            password=req.password,
+            scheme=req.scheme,
         )
         s["audit"].record("registry_login", actor="service",
                           actor_kind=ActorKind.SERVICE, args={"server": req.server})
@@ -629,6 +687,46 @@ async def registry_logout(server: str = Query(...)) -> dict[str, Any]:
         s["audit"].record("registry_logout", actor="service",
                           actor_kind=ActorKind.SERVICE, args={"server": server})
         return {"status": "logged_out", "server": server}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@app.get("/registry/default")
+async def registry_default_inspect() -> dict[str, Any]:
+    """Return the configured default registry host."""
+    s = _get_state()
+    try:
+        host = await s["backend"].registry_default_inspect()
+        return {"host": host}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@app.post("/registry/default")
+async def registry_default_set(req: RegistryDefaultRequest) -> dict[str, Any]:
+    """Set the default registry host."""
+    s = _get_state()
+    try:
+        await s["backend"].registry_default_set(req.host, scheme=req.scheme)
+        s["audit"].record(
+            "registry_default_set", actor="service",
+            actor_kind=ActorKind.SERVICE, args={"host": req.host, "scheme": req.scheme},
+        )
+        return {"status": "set", "host": req.host, "scheme": req.scheme}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@app.delete("/registry/default")
+async def registry_default_unset() -> dict[str, Any]:
+    """Clear the default registry host."""
+    s = _get_state()
+    try:
+        await s["backend"].registry_default_unset()
+        s["audit"].record(
+            "registry_default_unset", actor="service", actor_kind=ActorKind.SERVICE,
+        )
+        return {"status": "unset"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
 
@@ -666,6 +764,21 @@ async def builder_stop() -> dict[str, Any]:
     try:
         await s["backend"].builder_stop()
         return {"status": "stopped"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@app.delete("/builder")
+async def builder_delete(force: bool = Query(False)) -> dict[str, Any]:
+    """Delete the image builder VM."""
+    s = _get_state()
+    try:
+        await s["backend"].builder_delete(force=force)
+        s["audit"].record(
+            "builder_delete", actor="service",
+            actor_kind=ActorKind.SERVICE, args={"force": force},
+        )
+        return {"status": "deleted", "force": force}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
 
@@ -801,6 +914,75 @@ async def system_dns_delete(domain: str) -> dict[str, Any]:
         s["audit"].record("system_dns_delete", actor="service",
                           actor_kind=ActorKind.SERVICE, args={"domain": domain})
         return {"status": "deleted", "domain": domain}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@app.post("/system/start")
+async def system_start() -> dict[str, Any]:
+    """Start container system services (apiserver)."""
+    s = _get_state()
+    try:
+        await s["backend"].system_start()
+        s["audit"].record("system_start", actor="service", actor_kind=ActorKind.SERVICE)
+        return {"status": "started"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@app.post("/system/stop")
+async def system_stop() -> dict[str, Any]:
+    """Stop all container system services."""
+    s = _get_state()
+    try:
+        await s["backend"].system_stop()
+        s["audit"].record("system_stop", actor="service", actor_kind=ActorKind.SERVICE)
+        return {"status": "stopped"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@app.get("/system/logs")
+async def system_logs(last: str = Query("5m")) -> dict[str, str]:
+    """Fetch container system logs."""
+    s = _get_state()
+    try:
+        logs = await s["backend"].system_logs(last=last, follow=False)
+        return {"logs": logs}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@app.get("/system/logs/stream")
+async def system_logs_stream(last: str = Query("5m")) -> StreamingResponse:
+    """Poll container system logs."""
+    s = _get_state()
+
+    async def log_stream() -> AsyncIterator[str]:
+        while True:
+            chunk = await s["backend"].system_logs(last=last, follow=False)
+            yield chunk
+            await asyncio.sleep(2)
+
+    return StreamingResponse(log_stream(), media_type="text/plain")
+
+
+@app.post("/system/kernel/set")
+async def system_kernel_set(req: SystemKernelSetRequest) -> dict[str, Any]:
+    """Set the default container kernel."""
+    s = _get_state()
+    try:
+        await s["backend"].system_kernel_set(
+            binary=req.binary,
+            tar=req.tar,
+            arch=req.arch,
+            recommended=req.recommended,
+        )
+        s["audit"].record(
+            "system_kernel_set", actor="service", actor_kind=ActorKind.SERVICE,
+            args=req.model_dump(),
+        )
+        return {"status": "set", **req.model_dump()}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
 

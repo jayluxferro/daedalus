@@ -153,7 +153,9 @@ function CreateForm({ onDone }: { onDone: () => void }) {
   const [image, setImage] = useState('alpine:latest')
   const [name, setName] = useState('')
   const [profile, setProfile] = useState('detonation')
+  const [start, setStart] = useState(true)
   const [detach, setDetach] = useState(true)
+  const [remove, setRemove] = useState(false)
   const [command, setCommand] = useState('')
   const [advanced, setAdvanced] = useState(false)
   const [kernel, setKernel] = useState('')
@@ -162,7 +164,6 @@ function CreateForm({ onDone }: { onDone: () => void }) {
   const [dns, setDns] = useState('')
   const [volumes, setVolumes] = useState('')
   const [workdir, setWorkdir] = useState('')
-  const [hostname, setHostname] = useState('')
   const [env, setEnv] = useState('')
   const run = useRunContainer()
   const { data: profileList } = useProfiles()
@@ -172,9 +173,17 @@ function CreateForm({ onDone }: { onDone: () => void }) {
   return (
     <form onSubmit={e => {
       e.preventDefault()
-      // Detached + no command = container exits instantly. Default to sleep.
-      const cmd = command ? command.split(' ') : (detach ? ['sleep', '3600'] : undefined)
-      const body: Record<string, unknown> = { image, name: name || undefined, profile, detach, command: cmd }
+      const body: Record<string, unknown> = {
+        image,
+        name: name || undefined,
+        profile,
+        start,
+        detach: start ? detach : false,
+        remove,
+      }
+      if (command.trim()) {
+        body.command = command.split(/\s+/).filter(Boolean)
+      }
       if (advanced) {
         if (kernel) {
           body.kernel = kernel
@@ -185,7 +194,6 @@ function CreateForm({ onDone }: { onDone: () => void }) {
         if (dns) body.dns = [dns]
         if (volumes) body.volumes = volumes.split(',').map(v => v.trim()).filter(Boolean)
         if (workdir) body.workdir = workdir
-        if (hostname) body.hostname = hostname
         if (env) {
           const envObj: Record<string, string> = {}
           for (const pair of env.split(',')) {
@@ -199,18 +207,35 @@ function CreateForm({ onDone }: { onDone: () => void }) {
     }} style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
       <label style={label}>Image <input value={image} onChange={e => setImage(e.target.value)} style={input} /></label>
       <div style={{ display: 'flex', gap: 12 }}>
-        <label style={{ ...label, flex: 1 }}>Name <input value={name} onChange={e => setName(e.target.value)} placeholder="auto-generated" style={input} /></label>
+        <label style={{ ...label, flex: 1 }}>Name <input value={name} onChange={e => setName(e.target.value)} placeholder="optional" style={input} /></label>
         <label style={{ ...label, flex: 1 }}>Profile <select value={profile} onChange={e => setProfile(e.target.value)} style={selectStyle}>
           {profiles.map(p => <option key={p} value={p}>{p}</option>)}
         </select></label>
       </div>
-      <div style={{ display: 'flex', gap: 12, alignItems: 'flex-end' }}>
-        <label style={{ ...label, flex: 1 }}>Command <input value={command} onChange={e => setCommand(e.target.value)} placeholder="e.g. sleep 60" style={input} /></label>
-        <label style={{ ...label, flex: 0, flexDirection: 'row', alignItems: 'center', gap: 6, whiteSpace: 'nowrap' }}>
+      <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
+        <label style={{ ...label, flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+          <input type="radio" checked={start} onChange={() => setStart(true)} />
+          Create &amp; start
+        </label>
+        <label style={{ ...label, flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+          <input type="radio" checked={!start} onChange={() => setStart(false)} />
+          Create only (start later)
+        </label>
+      </div>
+      <label style={label}>
+        Command
+        <input value={command} onChange={e => setCommand(e.target.value)} placeholder="optional — default runs forever" style={input} />
+      </label>
+      {start && (
+        <label style={{ ...label, flexDirection: 'row', alignItems: 'center', gap: 6, width: 'fit-content' }}>
           <input type="checkbox" checked={detach} onChange={e => setDetach(e.target.checked)} />
           Detach
         </label>
-      </div>
+      )}
+      <label style={{ ...label, flexDirection: 'row', alignItems: 'center', gap: 6, width: 'fit-content' }}>
+        <input type="checkbox" checked={remove} onChange={e => setRemove(e.target.checked)} />
+        Auto-remove on exit
+      </label>
       <button type="button" onClick={() => setAdvanced(!advanced)} style={{ ...btnStyle, background: 'transparent', textAlign: 'left', fontSize: 12, color: '#3b82f6', border: 'none' }}>
         {advanced ? '▾ Hide advanced' : '▸ Advanced options'}
       </button>
@@ -223,13 +248,12 @@ function CreateForm({ onDone }: { onDone: () => void }) {
             <label style={label}>DNS <input value={dns} onChange={e => setDns(e.target.value)} placeholder="e.g. 8.8.8.8" style={input} /></label>
             <label style={{ ...label, gridColumn: '1 / -1' }}>Volumes <input value={volumes} onChange={e => setVolumes(e.target.value)} placeholder="/host/path:/container/path (comma-separated)" style={input} /></label>
             <label style={label}>Workdir <input value={workdir} onChange={e => setWorkdir(e.target.value)} placeholder="/app" style={input} /></label>
-            <label style={label}>Hostname <input value={hostname} onChange={e => setHostname(e.target.value)} placeholder="mybox" style={input} /></label>
             <label style={{ ...label, gridColumn: '1 / -1' }}>Env <input value={env} onChange={e => setEnv(e.target.value)} placeholder="FOO=bar,BAR=baz" style={input} /></label>
           </div>
         </GlassBox>
       )}
       <button type="submit" disabled={run.isPending} style={{ background: '#3b82f6', color: 'white', border: 'none', padding: '10px 16px', borderRadius: 6, cursor: 'pointer', fontSize: 13, fontWeight: 600, marginTop: 8 }}>
-        {run.isPending ? 'Creating...' : 'Create & Run'}
+        {run.isPending ? 'Working...' : start ? 'Create & Run' : 'Create'}
       </button>
       {run.isError && <p style={{ color: '#ef4444', fontSize: 12 }}>{(run.error as Error).message}</p>}
     </form>

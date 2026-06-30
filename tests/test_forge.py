@@ -14,7 +14,7 @@ from daedalus.core.backend import (
 )
 from daedalus.core.capabilities import CapabilityManifest
 from daedalus.core.exceptions import PolicyViolationError, ValidationError
-from daedalus.core.forge import Forge, Labyrinth, SystemStatus
+from daedalus.core.forge import DEFAULT_DETACHED_COMMAND, Forge, Labyrinth, SystemStatus
 from daedalus.core.policy import PolicyConfig, PolicyEngine
 from daedalus.core.store import Store
 
@@ -51,11 +51,23 @@ class MockBackend(Backend):
         self.containers[info.id] = info
         return info
 
-    async def start(self, container_id: str) -> None:
+    async def start(
+        self,
+        container_id: str,
+        *,
+        attach: bool = False,
+        interactive: bool = False,
+    ) -> None:
         if container_id in self.containers:
             self.containers[container_id].state = ContainerState.RUNNING
 
-    async def stop(self, container_id: str, timeout: int = 10) -> None:
+    async def stop(
+        self,
+        container_id: str,
+        timeout: int = 10,
+        *,
+        signal: str | None = None,
+    ) -> None:
         if container_id in self.containers:
             self.containers[container_id].state = ContainerState.STOPPED
 
@@ -84,9 +96,19 @@ class MockBackend(Backend):
         return ExecResult(0, f"mock: {' '.join(argv)}", "")
 
     # -- images --
-    async def image_pull(self, image: str, platform: str | None = None) -> None:
+    async def image_pull(
+        self,
+        image: str,
+        platform: str | None = None,
+        scheme: str | None = None,
+    ) -> None:
         pass
-    async def image_push(self, image: str) -> None:
+    async def image_push(
+        self,
+        image: str,
+        platform: str | None = None,
+        scheme: str | None = None,
+    ) -> None:
         pass
     async def image_save(self, image: str, output: str) -> str:
         return output
@@ -94,7 +116,7 @@ class MockBackend(Backend):
         return "loaded-image:latest"
     async def image_tag(self, source: str, target: str) -> None:
         pass
-    async def image_delete(self, image: str, force: bool = False) -> None:
+    async def image_delete(self, image: str, *, all: bool = False) -> None:
         pass
     async def image_inspect(self, image: str) -> dict:
         return {"id": image}
@@ -109,6 +131,12 @@ class MockBackend(Backend):
     async def registry_login(self, server: str, **kwargs: object) -> None:
         pass
     async def registry_logout(self, server: str) -> None:
+        pass
+    async def registry_default_inspect(self) -> str:
+        return ""
+    async def registry_default_set(self, host: str, scheme: str | None = None) -> None:
+        pass
+    async def registry_default_unset(self) -> None:
         pass
 
     # -- builder --
@@ -198,6 +226,13 @@ class TestLifecycle:
     async def test_run_with_command(self, forge: Forge):
         lab = await forge.run("alpine:latest", command=["echo", "hello"])
         assert lab.state == "running"
+
+    async def test_run_detached_keepalive(self, forge: Forge):
+        backend = forge.backend
+        assert isinstance(backend, MockBackend)
+        await forge.run("alpine:latest", detach=True)
+        assert backend.last_spec is not None
+        assert backend.last_spec.command == DEFAULT_DETACHED_COMMAND
 
     async def test_stop(self, forge: Forge):
         lab = await forge.run("alpine:latest")

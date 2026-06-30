@@ -27,7 +27,7 @@ from daedalus.core.exceptions import DaedalusError
 from daedalus.core.forge import Forge
 from daedalus.core.icarus import ExecOptions, Icarus
 from daedalus.core.mint import Mint
-from daedalus.core.policy import PolicyEngine, PolicyResult
+from daedalus.core.policy import PolicyEngine, PolicyResult, load_policy_config
 from daedalus.core.profiles import ProfileRegistry
 from daedalus.core.store import Store
 from daedalus.core.talos import Talos
@@ -61,7 +61,7 @@ async def daedalus_lifespan(server: FastMCP) -> AsyncIterator[DaedalusContext]:
     backend = CliBackend(caps)
     audit = AuditLog()
     store = Store()
-    policy = PolicyEngine()
+    policy = PolicyEngine(load_policy_config())
     audit_ref: list[AuditLog] = []
 
     def _policy_audit(operation: str, actor: str, result: PolicyResult) -> None:
@@ -205,6 +205,7 @@ async def daedalus_run(
     profile: str = "detonation",
     name: str | None = None,
     detach: bool = True,
+    remove: bool = False,
     command: list[str] | None = None,
     kernel: str | None = None,
     cpus: int | None = None,
@@ -214,7 +215,6 @@ async def daedalus_run(
     mounts: list[str] | None = None,
     env: dict[str, str] | None = None,
     workdir: str | None = None,
-    hostname: str | None = None,
     confirm_kernel: bool = False,
     ctx: Context | None = None,
 ) -> str:
@@ -249,8 +249,7 @@ async def daedalus_run(
             overrides["env"] = env
         if workdir is not None:
             overrides["workdir"] = workdir
-        if hostname is not None:
-            overrides["hostname"] = hostname
+        overrides["remove"] = remove
         kwargs = p.apply(**overrides)
         await ctx.report_progress(10, 100, "Creating container...")
         lab = await dc.forge.run(
@@ -267,6 +266,69 @@ async def daedalus_run(
                     "networks": network_names(lab.info.raw)})
     except DaedalusError as e:
         _audit_agent(dc, "run", {"image": image}, error=e.message)
+        return _err(e)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Create a container without starting it",
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=True,
+    ),
+)
+async def daedalus_create(
+    image: str,
+    profile: str = "detonation",
+    name: str | None = None,
+    remove: bool = False,
+    command: list[str] | None = None,
+    kernel: str | None = None,
+    cpus: int | None = None,
+    memory: str | None = None,
+    dns: list[str] | None = None,
+    volumes: list[str] | None = None,
+    mounts: list[str] | None = None,
+    env: dict[str, str] | None = None,
+    workdir: str | None = None,
+    confirm_kernel: bool = False,
+    ctx: Context | None = None,
+) -> str:
+    """Create a stopped container. Use daedalus_start to run it later."""
+    assert ctx is not None
+    dc = _get_ctx(ctx)
+    try:
+        p = dc.profiles.get(profile)
+        overrides: dict[str, object] = {}
+        if kernel is not None:
+            overrides["kernel"] = kernel
+        if cpus is not None:
+            overrides["cpus"] = cpus
+        if memory is not None:
+            overrides["memory"] = memory
+        if dns is not None:
+            overrides["dns"] = dns
+        if volumes is not None:
+            overrides["volumes"] = volumes
+        if mounts is not None:
+            overrides["mounts"] = mounts
+        if env is not None:
+            overrides["env"] = env
+        if workdir is not None:
+            overrides["workdir"] = workdir
+        overrides["remove"] = remove
+        kwargs = p.apply(**overrides)
+        lab = await dc.forge.create(
+            image, name=name, profile=profile, command=command,
+            confirm_kernel=confirm_kernel, **kwargs,
+        )
+        _audit_agent(dc, "create", {"image": image, "profile": profile},
+                     {"id": lab.id})
+        return _ok({"id": lab.id, "name": lab.name, "image": lab.image,
+                    "state": lab.state, "profile": lab.profile})
+    except DaedalusError as e:
+        _audit_agent(dc, "create", {"image": image}, error=e.message)
         return _err(e)
 
 
@@ -320,11 +382,17 @@ async def daedalus_inspect(container_id: str, ctx: Context) -> str:
         idempotentHint=True,
     ),
 )
-async def daedalus_stop(container_id: str, ctx: Context) -> str:
+async def daedalus_stop(
+    container_id: str,
+    timeout: int = 10,
+    signal: str | None = None,
+    ctx: Context | None = None,
+) -> str:
     """Stop a running container gracefully (SIGTERM + timeout)."""
+    assert ctx is not None
     dc = _get_ctx(ctx)
     try:
-        lab = await dc.forge.stop(container_id)
+        lab = await dc.forge.stop(container_id, timeout=timeout, signal=signal)
         _audit_agent(dc, "stop", {"container_id": container_id})
         return _ok({"id": lab.id, "state": lab.state})
     except DaedalusError as e:
@@ -362,11 +430,19 @@ async def daedalus_kill(
         idempotentHint=True,
     ),
 )
-async def daedalus_start(container_id: str, ctx: Context) -> str:
+async def daedalus_start(
+    container_id: str,
+    attach: bool = False,
+    interactive: bool = False,
+    ctx: Context | None = None,
+) -> str:
     """Start a previously stopped container."""
+    assert ctx is not None
     dc = _get_ctx(ctx)
     try:
-        lab = await dc.forge.start(container_id)
+        lab = await dc.forge.start(
+            container_id, attach=attach, interactive=interactive,
+        )
         _audit_agent(dc, "start", {"container_id": container_id})
         return _ok({"id": lab.id, "state": lab.state})
     except DaedalusError as e:
@@ -416,8 +492,13 @@ async def daedalus_exec(
     container_id: str,
     command: list[str],
     user: str | None = None,
+    uid: int | None = None,
+    gid: int | None = None,
     workdir: str | None = None,
     env: dict[str, str] | None = None,
+    env_file: str | None = None,
+    tty: bool = False,
+    interactive: bool = False,
     ctx: Context | None = None,
 ) -> str:
     """Execute a command inside a running container.
@@ -426,7 +507,10 @@ async def daedalus_exec(
     """
     dc = _get_ctx(ctx)
     try:
-        opts = ExecOptions(user=user, workdir=workdir, env=env)
+        opts = ExecOptions(
+            user=user, uid=uid, gid=gid, workdir=workdir, env=env,
+            env_file=env_file, tty=tty, interactive=interactive,
+        )
         result = await dc.icarus.exec(container_id, command, options=opts)
         _audit_agent(dc, "exec", {"container_id": container_id, "command": command})
         return _ok({"exit_code": result.exit_code, "stdout": result.stdout,
@@ -474,17 +558,23 @@ async def daedalus_logs(
         openWorldHint=True,
     ),
 )
-async def daedalus_image_pull(image: str, ctx: Context) -> str:
+async def daedalus_image_pull(
+    image: str,
+    platform: str | None = None,
+    scheme: str | None = None,
+    ctx: Context | None = None,
+) -> str:
     """Pull a container image from a registry.
 
     Examples:
         daedalus_image_pull(image="alpine:latest")
         daedalus_image_pull(image="ubuntu:24.04")
     """
+    assert ctx is not None
     dc = _get_ctx(ctx)
     try:
         await ctx.report_progress(0, 100, f"Pulling {image}...")
-        img = await dc.mint.pull(image)
+        img = await dc.mint.pull(image, platform=platform, scheme=scheme)
         await ctx.report_progress(100, 100, "Pull complete")
         _audit_agent(dc, "image_pull", {"image": image})
         return _ok({"name": img.name, "id": img.id})
@@ -520,14 +610,14 @@ async def daedalus_image_list(ctx: Context) -> str:
 )
 async def daedalus_image_delete(
     image: str,
-    force: bool = False,
+    all: bool = False,
     ctx: Context | None = None,
 ) -> str:
     """Delete a local container image."""
     dc = _get_ctx(ctx)
     try:
-        await dc.mint.delete(image, force=force)
-        _audit_agent(dc, "image_delete", {"image": image, "force": force})
+        await dc.mint.delete(image, all=all)
+        _audit_agent(dc, "image_delete", {"image": image, "all": all})
         return _ok({"name": image, "deleted": True})
     except DaedalusError as e:
         return _err(e)
@@ -562,11 +652,17 @@ async def daedalus_image_inspect(image: str, ctx: Context) -> str:
         openWorldHint=True,
     ),
 )
-async def daedalus_image_push(image: str, ctx: Context) -> str:
+async def daedalus_image_push(
+    image: str,
+    platform: str | None = None,
+    scheme: str | None = None,
+    ctx: Context | None = None,
+) -> str:
     """Push a local image to its registry."""
+    assert ctx is not None
     dc = _get_ctx(ctx)
     try:
-        await dc.mint.push(image)
+        await dc.mint.push(image, platform=platform, scheme=scheme)
         _audit_agent(dc, "image_push", {"image": image})
         return _ok({"name": image, "pushed": True})
     except DaedalusError as e:
@@ -734,6 +830,94 @@ async def daedalus_system_restart(ctx: Context) -> str:
 
 @mcp.tool(
     annotations=ToolAnnotations(
+        title="Start container system",
+        readOnlyHint=False,
+        idempotentHint=True,
+    ),
+)
+async def daedalus_system_start(ctx: Context) -> str:
+    """Start container system services (apiserver)."""
+    dc = _get_ctx(ctx)
+    try:
+        await dc.backend.system_start()
+        _audit_agent(dc, "system_start", {})
+        return _ok({"started": True})
+    except DaedalusError as e:
+        return _err(e)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Stop container system",
+        readOnlyHint=False,
+        destructiveHint=True,
+        idempotentHint=True,
+    ),
+)
+async def daedalus_system_stop(ctx: Context) -> str:
+    """Stop all container system services."""
+    dc = _get_ctx(ctx)
+    try:
+        await dc.backend.system_stop()
+        _audit_agent(dc, "system_stop", {})
+        return _ok({"stopped": True})
+    except DaedalusError as e:
+        return _err(e)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Container system logs",
+        readOnlyHint=True,
+        idempotentHint=True,
+    ),
+)
+async def daedalus_system_logs(
+    last: str = "5m",
+    ctx: Context | None = None,
+) -> str:
+    """Fetch container system logs."""
+    assert ctx is not None
+    dc = _get_ctx(ctx)
+    try:
+        logs = await dc.backend.system_logs(last=last)
+        return _ok({"logs": logs})
+    except DaedalusError as e:
+        return _err(e)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Set default container kernel",
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+    ),
+)
+async def daedalus_system_kernel_set(
+    binary: str | None = None,
+    tar: str | None = None,
+    arch: str = "arm64",
+    recommended: bool = False,
+    ctx: Context | None = None,
+) -> str:
+    """Set the default container kernel."""
+    assert ctx is not None
+    dc = _get_ctx(ctx)
+    try:
+        await dc.backend.system_kernel_set(
+            binary=binary, tar=tar, arch=arch, recommended=recommended,
+        )
+        _audit_agent(dc, "system_kernel_set", {
+            "binary": binary, "tar": tar, "arch": arch, "recommended": recommended,
+        })
+        return _ok({"set": True, "arch": arch})
+    except DaedalusError as e:
+        return _err(e)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
         title="Builder status",
         readOnlyHint=True,
         idempotentHint=True,
@@ -792,6 +976,29 @@ async def daedalus_builder_stop(ctx: Context) -> str:
 
 @mcp.tool(
     annotations=ToolAnnotations(
+        title="Delete image builder",
+        readOnlyHint=False,
+        destructiveHint=True,
+        idempotentHint=False,
+    ),
+)
+async def daedalus_builder_delete(
+    force: bool = False,
+    ctx: Context | None = None,
+) -> str:
+    """Delete the image builder VM."""
+    assert ctx is not None
+    dc = _get_ctx(ctx)
+    try:
+        await dc.backend.builder_delete(force=force)
+        _audit_agent(dc, "builder_delete", {"force": force})
+        return _ok({"deleted": True, "force": force})
+    except DaedalusError as e:
+        return _err(e)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
         title="Login to a container registry",
         readOnlyHint=False,
         openWorldHint=True,
@@ -801,13 +1008,16 @@ async def daedalus_registry_login(
     server: str,
     username: str | None = None,
     password: str | None = None,
+    scheme: str | None = None,
     ctx: Context | None = None,
 ) -> str:
     """Login to a container registry (password optional)."""
     assert ctx is not None
     dc = _get_ctx(ctx)
     try:
-        await dc.backend.registry_login(server, username=username, password=password)
+        await dc.backend.registry_login(
+            server, username=username, password=password, scheme=scheme,
+        )
         _audit_agent(dc, "registry_login", {"server": server})
         return _ok({"server": server, "logged_in": True})
     except DaedalusError as e:
@@ -827,6 +1037,64 @@ async def daedalus_registry_logout(server: str, ctx: Context) -> str:
         await dc.backend.registry_logout(server)
         _audit_agent(dc, "registry_logout", {"server": server})
         return _ok({"server": server, "logged_out": True})
+    except DaedalusError as e:
+        return _err(e)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Inspect default registry",
+        readOnlyHint=True,
+        idempotentHint=True,
+    ),
+)
+async def daedalus_registry_default_inspect(ctx: Context) -> str:
+    """Return the configured default registry host."""
+    dc = _get_ctx(ctx)
+    try:
+        host = await dc.backend.registry_default_inspect()
+        return _ok({"host": host})
+    except DaedalusError as e:
+        return _err(e)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Set default registry",
+        readOnlyHint=False,
+        idempotentHint=True,
+    ),
+)
+async def daedalus_registry_default_set(
+    host: str,
+    scheme: str | None = None,
+    ctx: Context | None = None,
+) -> str:
+    """Set the default registry host."""
+    assert ctx is not None
+    dc = _get_ctx(ctx)
+    try:
+        await dc.backend.registry_default_set(host, scheme=scheme)
+        _audit_agent(dc, "registry_default_set", {"host": host, "scheme": scheme})
+        return _ok({"host": host, "scheme": scheme, "set": True})
+    except DaedalusError as e:
+        return _err(e)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Unset default registry",
+        readOnlyHint=False,
+        idempotentHint=True,
+    ),
+)
+async def daedalus_registry_default_unset(ctx: Context) -> str:
+    """Clear the default registry host."""
+    dc = _get_ctx(ctx)
+    try:
+        await dc.backend.registry_default_unset()
+        _audit_agent(dc, "registry_default_unset", {})
+        return _ok({"unset": True})
     except DaedalusError as e:
         return _err(e)
 

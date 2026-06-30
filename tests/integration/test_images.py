@@ -40,6 +40,6 @@ class TestRealImages:
             assert any("daedalus-test" in r for r in references)
         finally:
             try:
-                await backend.image_delete("daedalus-test:latest", force=True)
+                await backend.image_delete("daedalus-test:latest")
             except Exception:
                 pass

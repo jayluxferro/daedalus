@@ -7,7 +7,7 @@ import pytest
 from daedalus.mcp import server as mcp_server
 
 _EXPECTED_TOOLS = {
-    "daedalus_health", "daedalus_run", "daedalus_list", "daedalus_inspect",
+    "daedalus_health", "daedalus_run", "daedalus_create", "daedalus_list", "daedalus_inspect",
     "daedalus_start", "daedalus_stop", "daedalus_kill", "daedalus_destroy",
     "daedalus_exec", "daedalus_logs",
     "daedalus_image_pull", "daedalus_image_list", "daedalus_image_delete",
@@ -15,8 +15,13 @@ _EXPECTED_TOOLS = {
     "daedalus_image_load", "daedalus_image_save", "daedalus_image_tag",
     "daedalus_image_prune",
     "daedalus_system_status", "daedalus_system_restart",
+    "daedalus_system_start", "daedalus_system_stop", "daedalus_system_logs",
+    "daedalus_system_kernel_set",
     "daedalus_builder_status", "daedalus_builder_start", "daedalus_builder_stop",
+    "daedalus_builder_delete",
     "daedalus_registry_login", "daedalus_registry_logout",
+    "daedalus_registry_default_inspect", "daedalus_registry_default_set",
+    "daedalus_registry_default_unset",
     "daedalus_audit", "daedalus_experiments",
     "daedalus_dns_list", "daedalus_dns_create", "daedalus_dns_delete",
     "daedalus_profiles",

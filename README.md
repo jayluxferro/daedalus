@@ -98,7 +98,8 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the full design.
 ```bash
 mypy --strict daedalus/     # zero errors
 pytest -m unit -q            # 108 passed
-pytest -m integration -q     # 11 passed (requires container daemon)
+pytest -m integration -q     # integration tests (requires container daemon)
+DAEDALUS_LIVE=1 pytest tests/integration/test_mcp_live.py -v  # all 42 MCP tools live
 ```
 
 ## License
