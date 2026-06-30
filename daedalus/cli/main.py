@@ -116,6 +116,9 @@ def run(
     command: Annotated[str | None, typer.Option("--command", "-c")] = None,
     volume: Annotated[list[str], typer.Option("--volume", "-v", help="Bind mount host:container")] = [],
     mount: Annotated[list[str], typer.Option("--mount", help="Mount spec type=,source=,target=")] = [],
+    env: Annotated[list[str], typer.Option("--env", "-e", help="KEY=VALUE")] = [],
+    workdir: Annotated[str | None, typer.Option("--workdir", "-w")] = None,
+    hostname: Annotated[str | None, typer.Option("--hostname")] = None,
     json_output: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:
     """Create and start a container."""
@@ -128,6 +131,12 @@ def run(
         kwargs["volumes"] = volume
     if mount:
         kwargs["mounts"] = mount
+    if env:
+        kwargs["env"] = dict(e.split("=", 1) for e in env if "=" in e)
+    if workdir:
+        kwargs["workdir"] = workdir
+    if hostname:
+        kwargs["hostname"] = hostname
     cmd_list = command.split() if command else None
 
     async def _go() -> None:
@@ -215,6 +224,19 @@ def destroy(
     async def _go() -> None:
         await _f().destroy(container_id, confirm=confirm)
         console.print(f"[red]✗[/] Destroyed [bold]{container_id[:12]}[/]")
+    asyncio.run(_go())
+
+
+@app.command()
+def kill(
+    container_id: str,
+    signal: Annotated[str, typer.Option("--signal", "-s")] = "KILL",
+) -> None:
+    """Kill a running container."""
+    _bootstrap()
+    async def _go() -> None:
+        lab = await _f().kill(container_id, signal=signal)
+        console.print(f"[red]†[/] Killed [bold]{lab.id[:12]}[/] ({signal}) — {lab.state}")
     asyncio.run(_go())
 
 
@@ -359,6 +381,65 @@ def image_load(path: str) -> None:
     asyncio.run(_go())
 
 
+@app.command("image-save")
+def image_save(image: str, output: Annotated[str, typer.Option("-o", "--output")]) -> None:
+    """Save an image as an OCI-compatible tar archive."""
+    _bootstrap()
+    async def _go() -> None:
+        path = await _m().save(image, output)
+        console.print(f"[green]✓[/] Saved {image} → {path}")
+    asyncio.run(_go())
+
+
+@app.command("image-tag")
+def image_tag(source: str, target: str) -> None:
+    """Tag an image (create alias)."""
+    _bootstrap()
+    async def _go() -> None:
+        await _m().tag(source, target)
+        console.print(f"[green]✓[/] Tagged {source} → {target}")
+    asyncio.run(_go())
+
+
+@app.command("image-prune")
+def image_prune() -> None:
+    """Remove dangling/unreferenced images."""
+    _bootstrap()
+    async def _go() -> None:
+        removed = await _m().prune()
+        if not removed:
+            console.print("[dim]Nothing to prune.[/]")
+            return
+        for name in removed:
+            console.print(f"[yellow]–[/] {name}")
+        console.print(f"[green]✓[/] Pruned {len(removed)} image(s)")
+    asyncio.run(_go())
+
+
+@app.command("registry-login")
+def registry_login(
+    server: str,
+    username: Annotated[str | None, typer.Option("-u", "--username")] = None,
+    password: Annotated[str | None, typer.Option("-p", "--password", hide_input=True)] = None,
+) -> None:
+    """Login to a container registry."""
+    _bootstrap()
+    async def _go() -> None:
+        await _f().backend.registry_login(server, username=username, password=password)
+        console.print(f"[green]✓[/] Logged in to {server}")
+    asyncio.run(_go())
+
+
+@app.command("registry-logout")
+def registry_logout(server: str) -> None:
+    """Logout from a container registry."""
+    _bootstrap()
+    async def _go() -> None:
+        await _f().backend.registry_logout(server)
+        console.print(f"[green]✓[/] Logged out from {server}")
+    asyncio.run(_go())
+
+
 @app.command()
 def audit_cmd(
     operation: Annotated[str | None, typer.Option("--operation")] = None,
@@ -400,6 +481,49 @@ def system_status() -> None:
         console.print(f"Containers: {status.container_count} ({status.running_count} running)")
         if status.disk_usage:
             console.print(f"Disk: {status.disk_usage}")
+    asyncio.run(_go())
+
+
+@app.command("builder-status")
+def builder_status() -> None:
+    """Show image builder status."""
+    _bootstrap()
+    async def _go() -> None:
+        data = await _f().backend.builder_status()
+        console.print_json(json.dumps(data, indent=2))
+    asyncio.run(_go())
+
+
+@app.command("builder-start")
+def builder_start(
+    cpus: Annotated[int, typer.Option("-c", "--cpus")] = 2,
+    memory: Annotated[str, typer.Option("-m", "--memory")] = "2048M",
+) -> None:
+    """Start the image builder VM."""
+    _bootstrap()
+    async def _go() -> None:
+        await _f().backend.builder_start(cpus=cpus, memory=memory)
+        console.print(f"[green]✓[/] Builder started ({cpus} CPUs, {memory})")
+    asyncio.run(_go())
+
+
+@app.command("builder-stop")
+def builder_stop() -> None:
+    """Stop the image builder VM."""
+    _bootstrap()
+    async def _go() -> None:
+        await _f().backend.builder_stop()
+        console.print("[yellow]■[/] Builder stopped")
+    asyncio.run(_go())
+
+
+@app.command("system-restart")
+def system_restart() -> None:
+    """Restart the container apiserver."""
+    _bootstrap()
+    async def _go() -> None:
+        await _f().backend.system_restart()
+        console.print("[green]✓[/] Container apiserver restarted")
     asyncio.run(_go())
 
 

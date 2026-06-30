@@ -14,6 +14,8 @@ export default defineConfig({
       '/system': proxy,
       '/experiments': proxy,
       '/topology': proxy,
+      '/registry': proxy,
+      '/builder': proxy,
     }
   },
   base: '/ui/',

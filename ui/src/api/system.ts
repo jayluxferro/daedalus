@@ -1,5 +1,5 @@
-import { useQuery } from '@tanstack/react-query'
-import { apiGet } from './client'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { apiGet, apiPost, apiDelete } from './client'
 
 export interface SystemStatus {
   container_version: string
@@ -35,5 +35,45 @@ export function useProfiles() {
   return useQuery({
     queryKey: ['profiles'],
     queryFn: () => apiGet<ProfileInfo[]>('/profiles'),
+  })
+}
+
+export function useDnsList() {
+  return useQuery({
+    queryKey: ['dns'],
+    queryFn: () => apiGet<string[]>('/system/dns'),
+    refetchInterval: 10000,
+  })
+}
+
+export function useDnsCreate() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (domain: string) =>
+      apiPost<{ status: string; domain: string }>(`/system/dns?domain=${encodeURIComponent(domain)}`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['dns'] }),
+  })
+}
+
+export function useDnsDelete() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (domain: string) =>
+      apiDelete<{ status: string }>(`/system/dns/${encodeURIComponent(domain)}`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['dns'] }),
+  })
+}
+
+export function useBuilderStatus() {
+  return useQuery({
+    queryKey: ['builder-status'],
+    queryFn: () => apiGet<Record<string, unknown>>('/builder/status'),
+    refetchInterval: 15000,
+  })
+}
+
+export function useSystemRestart() {
+  return useMutation({
+    mutationFn: () => apiPost<{ status: string }>('/system/restart'),
   })
 }

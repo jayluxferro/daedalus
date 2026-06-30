@@ -459,7 +459,7 @@ class Backend(ABC):
 
     @abstractmethod
     async def registry_login(self, server: str, username: str | None = None,
-                             password_stdin: bool = False) -> None:
+                             password: str | None = None) -> None:
         """Login to a registry."""
         ...
 

@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { useImages, usePullImage, useDeleteImage, useInspectImage, useBuildImage, usePushImage, useLoadImage, imageRef } from '../api/images'
+import { useImages, usePullImage, useDeleteImage, useInspectImage, useBuildImage, usePushImage, useLoadImage, useSaveImage, useTagImage, usePruneImages, imageRef } from '../api/images'
 import { Box, GlassBox, Modal } from './shared'
 
 export default function ImagesView() {
@@ -8,14 +8,18 @@ export default function ImagesView() {
   const [showBuild, setShowBuild] = useState(false)
   const [showLoad, setShowLoad] = useState(false)
   const [inspectName, setInspectName] = useState<string | null>(null)
+  const [showSave, setShowSave] = useState<string | null>(null)
   const deleteMutation = useDeleteImage()
   const pushMutation = usePushImage()
+  const tagMutation = useTagImage()
+  const pruneMutation = usePruneImages()
 
   return (
     <Box>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
         <h2 style={{ fontSize: 20, fontWeight: 600, margin: 0 }}>Images</h2>
         <div style={{ display: 'flex', gap: 8 }}>
+          <button onClick={() => { if (confirm('Prune dangling images?')) pruneMutation.mutate() }} disabled={pruneMutation.isPending} style={secondaryBtn}>Prune</button>
           <button onClick={() => setShowLoad(true)} style={secondaryBtn}>Load tar</button>
           <button onClick={() => setShowBuild(true)} style={secondaryBtn}>Build</button>
           <button onClick={() => setShowPull(true)} style={btnStyle}>+ Pull Image</button>
@@ -43,6 +47,11 @@ export default function ImagesView() {
                   <td style={td}><code style={{ fontSize: 11 }}>{img.digest ? img.digest.slice(0, 16) : '—'}</code></td>
                   <td style={{ ...td, display: 'flex', gap: 4 }}>
                     <button onClick={() => setInspectName(imageRef(img))} style={inspectBtn}>Inspect</button>
+                    <button onClick={() => setShowSave(imageRef(img))} style={inspectBtn}>Save</button>
+                    <button onClick={() => {
+                      const target = prompt('New tag:', `${imageRef(img)}-copy`)
+                      if (target) tagMutation.mutate({ source: imageRef(img), target })
+                    }} style={inspectBtn}>Tag</button>
                     <button onClick={() => pushMutation.mutate(imageRef(img))} disabled={pushMutation.isPending} style={inspectBtn}>
                       Push
                     </button>
@@ -76,6 +85,7 @@ export default function ImagesView() {
         </Modal>
       )}
       {inspectName && <InspectModal name={inspectName} onClose={() => setInspectName(null)} />}
+      {showSave && <SaveModal image={showSave} onClose={() => setShowSave(null)} />}
     </Box>
   )
 }
@@ -145,6 +155,24 @@ function LoadForm({ onDone }: { onDone: () => void }) {
       </button>
       {load.isError && <p style={{ color: 'var(--danger)', fontSize: 12 }}>{(load.error as Error).message}</p>}
     </form>
+  )
+}
+
+function SaveModal({ image, onClose }: { image: string; onClose: () => void }) {
+  const [output, setOutput] = useState(`./${image.replace(/[/:]/g, '_')}.tar`)
+  const save = useSaveImage()
+
+  return (
+    <Modal onClose={onClose}>
+      <h3 style={{ fontSize: 16, fontWeight: 600, marginBottom: 16 }}>Save {image}</h3>
+      <form onSubmit={e => { e.preventDefault(); save.mutate({ image, output }, { onSuccess: onClose }) }} style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <label style={label}>Output path <input value={output} onChange={e => setOutput(e.target.value)} style={input} required /></label>
+        <button type="submit" disabled={save.isPending} style={{ ...btnStyle, width: '100%' }}>
+          {save.isPending ? 'Saving...' : 'Save OCI tar'}
+        </button>
+        {save.isError && <p style={{ color: 'var(--danger)', fontSize: 12 }}>{(save.error as Error).message}</p>}
+      </form>
+    </Modal>
   )
 }
 

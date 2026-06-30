@@ -6,8 +6,14 @@ import pytest
 
 from daedalus.core.backend import RunSpec
 from daedalus.core.cli_backend import CliBackend
+from daedalus.core.exceptions import PolicyViolationError
 
 TEST_IMAGE = "alpine:latest"
+
+
+def _skip_on_policy(exc: BaseException) -> None:
+    if isinstance(exc, PolicyViolationError) or "POLICY" in str(exc):
+        pytest.skip("disk policy blocked container create on this host")
 
 
 @pytest.mark.integration
@@ -22,7 +28,11 @@ class TestRealLifecycle:
     async def test_create_and_inspect(self, backend: CliBackend) -> None:
         """Create a container and inspect it."""
         spec = RunSpec(image=TEST_IMAGE, command=["echo", "hello"])
-        info = await backend.create(spec)
+        try:
+            info = await backend.create(spec)
+        except Exception as e:
+            _skip_on_policy(e)
+            raise
         assert info.id
         assert info.image == TEST_IMAGE
         # Inspect should find it
@@ -34,7 +44,11 @@ class TestRealLifecycle:
     async def test_run_and_stop(self, backend: CliBackend) -> None:
         """Run a container, verify it appears, stop it."""
         spec = RunSpec(image=TEST_IMAGE, detach=True, command=["sleep", "30"])
-        info = await backend.run(spec)
+        try:
+            info = await backend.run(spec)
+        except Exception as e:
+            _skip_on_policy(e)
+            raise
         assert info.id
         await backend.stop(info.id, timeout=5)
         await backend.delete(info.id, force=True)
@@ -43,7 +57,11 @@ class TestRealLifecycle:
         """Execute a command inside a running container."""
         import contextlib
         spec = RunSpec(image=TEST_IMAGE, detach=True, command=["sleep", "300"])
-        info = await icarus._backend.run(spec)
+        try:
+            info = await icarus._backend.run(spec)
+        except Exception as e:
+            _skip_on_policy(e)
+            raise
         try:
             result = await icarus.exec(info.id, ["echo", "hello", "world"])
             assert result.exit_code == 0
@@ -57,7 +75,11 @@ class TestRealLifecycle:
     async def test_logs(self, backend: CliBackend) -> None:
         """Retrieve logs from a container."""
         spec = RunSpec(image=TEST_IMAGE, detach=True, command=["sh", "-c", "echo log-test-42 && sleep 2"])
-        info = await backend.run(spec)
+        try:
+            info = await backend.run(spec)
+        except Exception as e:
+            _skip_on_policy(e)
+            raise
         import asyncio
         await asyncio.sleep(3)
         logs = await backend.logs(info.id)

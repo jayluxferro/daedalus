@@ -142,6 +142,10 @@ class Mint:
 
     async def tag(self, source: str, target: str) -> None:
         await self._backend.image_tag(source, target)
+        self._audit.record(
+            "image_tag", actor="mint", actor_kind=ActorKind.SERVICE,
+            args={"source": source, "target": target},
+        )
 
     async def delete(self, image: str, force: bool = False) -> None:
         await self._backend.image_delete(image, force=force)

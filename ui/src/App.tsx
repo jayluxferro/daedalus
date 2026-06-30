@@ -7,9 +7,10 @@ import AuditView from './views/Audit'
 import ProfilesView from './views/Profiles'
 import ExperimentsView from './views/Experiments'
 import TopologyView from './views/Topology'
+import DnsView from './views/Dns'
 import TerminalView from './views/Terminal'
 
-type Page = 'dashboard' | 'containers' | 'terminal' | 'images' | 'logs' | 'audit' | 'profiles' | 'experiments' | 'topology'
+type Page = 'dashboard' | 'containers' | 'terminal' | 'images' | 'logs' | 'audit' | 'profiles' | 'experiments' | 'topology' | 'dns'
 
 const NAV: { id: Page; label: string }[] = [
   { id: 'dashboard', label: 'Dashboard' },
@@ -19,6 +20,7 @@ const NAV: { id: Page; label: string }[] = [
   { id: 'logs', label: 'Logs' },
   { id: 'experiments', label: 'Experiments' },
   { id: 'topology', label: 'Topology' },
+  { id: 'dns', label: 'DNS' },
   { id: 'audit', label: 'Audit' },
   { id: 'profiles', label: 'Profiles' },
 ]
@@ -67,6 +69,7 @@ export default function App() {
         {page === 'audit' && <AuditView />}
         {page === 'experiments' && <ExperimentsView />}
         {page === 'topology' && <TopologyView />}
+        {page === 'dns' && <DnsView />}
         {page === 'profiles' && <ProfilesView />}
       </main>
     </div>

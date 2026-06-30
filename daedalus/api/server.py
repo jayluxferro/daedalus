@@ -48,7 +48,7 @@ from typing import Any
 
 import yaml
 
-from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -84,7 +84,21 @@ class RunRequest(BaseModel):
     dns: list[str] | None = None
     volumes: list[str] | None = None
     mounts: list[str] | None = None
+    env: dict[str, str] | None = None
+    workdir: str | None = None
+    hostname: str | None = None
     confirm_kernel: bool = False
+
+
+class ImageTagRequest(BaseModel):
+    source: str
+    target: str
+
+
+class RegistryLoginRequest(BaseModel):
+    server: str
+    username: str | None = None
+    password: str | None = None
 
 
 def _container_dict(lab: Any) -> dict[str, Any]:
@@ -235,6 +249,12 @@ async def create_container(req: RunRequest) -> dict[str, Any]:
         overrides["volumes"] = req.volumes
     if req.mounts is not None:
         overrides["mounts"] = req.mounts
+    if req.env is not None:
+        overrides["env"] = req.env
+    if req.workdir is not None:
+        overrides["workdir"] = req.workdir
+    if req.hostname is not None:
+        overrides["hostname"] = req.hostname
     kwargs = p.apply(**overrides)
     forge: Any = s["forge"]
     lab = await forge.run(
@@ -300,6 +320,22 @@ async def stop_container(container_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 
+@app.post("/containers/{container_id}/kill")
+async def kill_container(
+    container_id: str,
+    signal: str = Query("KILL"),
+) -> dict[str, Any]:
+    """Kill a running container."""
+    s = _get_state()
+    try:
+        lab = await s["forge"].kill(container_id, signal=signal)
+        s["audit"].record("kill", actor="service", actor_kind=ActorKind.SERVICE,
+                          args={"container_id": container_id, "signal": signal})
+        return {"status": "killed", "id": lab.id, "state": lab.state, "signal": signal}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
 @app.post("/containers/{container_id}/exec")
 async def container_exec(container_id: str, req: ExecRequest) -> dict[str, Any]:
     s = _get_state()
@@ -328,6 +364,7 @@ async def container_logs(
 
 @app.get("/containers/{container_id}/logs/stream")
 async def container_logs_stream(
+    request: Request,
     container_id: str,
     boot: bool = Query(False),
 ) -> StreamingResponse:
@@ -335,6 +372,7 @@ async def container_logs_stream(
     s = _get_state()
 
     async def event_stream() -> AsyncIterator[str]:
+        yield ": connected\n\n"
         seen: set[str] = set()
         try:
             initial = await s["icarus"].logs(container_id, boot=boot)
@@ -346,6 +384,8 @@ async def container_logs_stream(
             yield f"event: error\ndata: container not found\n\n"
             return
         while True:
+            if await request.is_disconnected():
+                break
             try:
                 new_logs = await s["icarus"].logs(container_id, boot=boot, tail=30)
                 for line in new_logs.splitlines():
@@ -526,6 +566,110 @@ async def image_load(path: str = Query(...)) -> dict[str, Any]:
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 
+@app.post("/images/save")
+async def image_save(
+    image: str = Query(...),
+    output: str = Query(...),
+) -> dict[str, Any]:
+    """Save an image as an OCI-compatible tar archive."""
+    s = _get_state()
+    try:
+        path = await s["mint"].save(image, output)
+        return {"status": "saved", "image": image, "path": path}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@app.post("/images/tag")
+async def image_tag(req: ImageTagRequest) -> dict[str, Any]:
+    """Tag an image (alias)."""
+    s = _get_state()
+    try:
+        await s["mint"].tag(req.source, req.target)
+        return {"status": "tagged", "source": req.source, "target": req.target}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@app.post("/images/prune")
+async def image_prune() -> dict[str, Any]:
+    """Remove dangling/unreferenced images."""
+    s = _get_state()
+    try:
+        removed = await s["mint"].prune()
+        return {"status": "pruned", "removed": removed, "count": len(removed)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+# ==========================================================================
+# Registry
+# ==========================================================================
+
+
+@app.post("/registry/login")
+async def registry_login(req: RegistryLoginRequest) -> dict[str, Any]:
+    s = _get_state()
+    try:
+        await s["backend"].registry_login(
+            req.server, username=req.username, password=req.password,
+        )
+        s["audit"].record("registry_login", actor="service",
+                          actor_kind=ActorKind.SERVICE, args={"server": req.server})
+        return {"status": "logged_in", "server": req.server}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@app.post("/registry/logout")
+async def registry_logout(server: str = Query(...)) -> dict[str, Any]:
+    s = _get_state()
+    try:
+        await s["backend"].registry_logout(server)
+        s["audit"].record("registry_logout", actor="service",
+                          actor_kind=ActorKind.SERVICE, args={"server": server})
+        return {"status": "logged_out", "server": server}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+# ==========================================================================
+# Builder
+# ==========================================================================
+
+
+@app.get("/builder/status")
+async def builder_status() -> dict[str, Any]:
+    s = _get_state()
+    try:
+        return await s["backend"].builder_status()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@app.post("/builder/start")
+async def builder_start(
+    cpus: int = Query(2),
+    memory: str = Query("2048M"),
+) -> dict[str, Any]:
+    s = _get_state()
+    try:
+        await s["backend"].builder_start(cpus=cpus, memory=memory)
+        return {"status": "started", "cpus": cpus, "memory": memory}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@app.post("/builder/stop")
+async def builder_stop() -> dict[str, Any]:
+    s = _get_state()
+    try:
+        await s["backend"].builder_stop()
+        return {"status": "stopped"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
 # ==========================================================================
 # Profiles
 # ==========================================================================
@@ -661,14 +805,28 @@ async def system_dns_delete(domain: str) -> dict[str, Any]:
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 
+@app.post("/system/restart")
+async def system_restart() -> dict[str, Any]:
+    """Restart the container apiserver."""
+    s = _get_state()
+    try:
+        await s["backend"].system_restart()
+        s["audit"].record("system_restart", actor="service", actor_kind=ActorKind.SERVICE)
+        return {"status": "restarted"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
 @app.get("/system/events")
-async def system_events_stream() -> StreamingResponse:
+async def system_events_stream(request: Request) -> StreamingResponse:
     """SSE stream of container lifecycle events."""
     s = _get_state()
 
     async def event_stream() -> AsyncIterator[str]:
         prev: tuple[int, int] | None = None
         while True:
+            if await request.is_disconnected():
+                break
             try:
                 forge: Forge = s["forge"]
                 labs = await forge.list(all=True)

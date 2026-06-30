@@ -1,12 +1,15 @@
-import { useSystemStatus } from '../api/system'
+import { useSystemStatus, useBuilderStatus, useSystemRestart } from '../api/system'
 import { useContainers } from '../api/containers'
-import { useImages } from '../api/images'
+import { useImages, usePruneImages } from '../api/images'
 import { Box, GlassBox, StatCard, Badge } from './shared'
 
 export default function Dashboard() {
   const { data: status } = useSystemStatus()
+  const { data: builder } = useBuilderStatus()
   const { data: containers, isLoading: loadingContainers } = useContainers(true)
   const { data: images, isLoading: loadingImages } = useImages()
+  const prune = usePruneImages()
+  const restart = useSystemRestart()
 
   const running = containers?.filter(c => c.state === 'running').length ?? 0
   const stopped = (containers?.length ?? 0) - running
@@ -45,8 +48,36 @@ export default function Dashboard() {
                 <span>{formatBytes(diskUsed)} used</span>
                 <span>{diskTotal > 0 ? formatBytes(diskTotal) + ' total' : '—'}</span>
               </div>
+              <button
+                onClick={() => { if (confirm('Prune dangling images?')) prune.mutate() }}
+                disabled={prune.isPending}
+                style={{ marginTop: 12, padding: '6px 12px', fontSize: 12, background: '#1c1c22', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--fg)', cursor: 'pointer' }}
+              >
+                {prune.isPending ? 'Pruning...' : 'Prune images'}
+              </button>
             </>
           )}
+        </GlassBox>
+
+        <GlassBox>
+          <h3 style={{ fontSize: 14, fontWeight: 600, marginBottom: 12, color: 'var(--muted-fg)' }}>Image Builder</h3>
+          <pre style={{ fontSize: 11, color: 'var(--muted-fg)', margin: 0, whiteSpace: 'pre-wrap', maxHeight: 120, overflow: 'auto' }}>
+            {builder ? JSON.stringify(builder, null, 2) : '...'}
+          </pre>
+        </GlassBox>
+
+        <GlassBox>
+          <h3 style={{ fontSize: 14, fontWeight: 600, marginBottom: 12, color: 'var(--muted-fg)' }}>Daemon</h3>
+          <p style={{ fontSize: 12, color: 'var(--muted-fg)', margin: '0 0 12px' }}>
+            Commit: {status?.container_commit ?? '...'}
+          </p>
+          <button
+            onClick={() => { if (confirm('Restart container apiserver?')) restart.mutate() }}
+            disabled={restart.isPending}
+            style={{ padding: '6px 12px', fontSize: 12, background: '#1c1c22', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--fg)', cursor: 'pointer' }}
+          >
+            {restart.isPending ? 'Restarting...' : 'Restart apiserver'}
+          </button>
         </GlassBox>
 
         <GlassBox>
@@ -54,9 +85,6 @@ export default function Dashboard() {
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
             <Badge color="var(--success)">Running: {running}</Badge>
             <Badge>Stopped: {stopped}</Badge>
-          </div>
-          <div style={{ fontSize: 12, color: 'var(--muted-fg)', marginTop: 12 }}>
-            Commit: {status?.container_commit ?? '...'}
           </div>
         </GlassBox>
 

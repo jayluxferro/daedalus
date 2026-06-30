@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { useContainers, useRunContainer, useStartContainer, useStopContainer, useDestroyContainer, useInspectContainer } from '../api/containers'
+import { useContainers, useRunContainer, useStartContainer, useStopContainer, useDestroyContainer, useKillContainer, useInspectContainer } from '../api/containers'
 import { useProfiles } from '../api/system'
 import { Box, GlassBox, Badge, StatCard, Modal } from './shared'
 
@@ -102,7 +102,12 @@ function ContainerRow({ container: c, onInspect, onOpenTerminal }: {
   const start = useStartContainer()
   const stop = useStopContainer()
   const destroy = useDestroyContainer()
+  const kill = useKillContainer()
   const running = c.state === 'running'
+
+  const copyIp = () => {
+    if (c.ip) navigator.clipboard.writeText(`ssh root@${c.ip}`)
+  }
 
   return (
     <tr style={{ borderBottom: '1px solid var(--border)' }}>
@@ -112,13 +117,20 @@ function ContainerRow({ container: c, onInspect, onOpenTerminal }: {
       <td style={{ padding: 8 }}>
         <Badge color={running ? '#22c55e' : '#71717a'}>{c.state}</Badge>
       </td>
-      <td style={{ padding: 8, fontFamily: 'monospace', fontSize: 11, color: 'var(--muted-fg)' }}>{c.ip || '—'}</td>
+      <td style={{ padding: 8, fontFamily: 'monospace', fontSize: 11, color: 'var(--muted-fg)' }}>
+        {c.ip ? (
+          <button onClick={copyIp} title="Copy ssh command" style={{ background: 'none', border: 'none', color: 'inherit', cursor: 'pointer', fontFamily: 'inherit', fontSize: 'inherit', padding: 0 }}>
+            {c.ip}
+          </button>
+        ) : '—'}
+      </td>
       <td style={{ padding: 8, fontSize: 12 }}>{c.profile}</td>
-      <td style={{ padding: 8, display: 'flex', gap: 4 }}>
+      <td style={{ padding: 8, display: 'flex', gap: 4, flexWrap: 'wrap' }}>
         <button onClick={() => onInspect(c.id)} style={btnStyle}>Inspect</button>
         {onOpenTerminal && running && <button onClick={() => onOpenTerminal(c.id)} style={btnStyle}>Term</button>}
         {!running && <button onClick={() => start.mutate(c.id)} style={{...btnStyle, color:'#22c55e'}} disabled={start.isPending}>Start</button>}
         {running && <button onClick={() => stop.mutate(c.id)} style={btnStyle} disabled={stop.isPending}>Stop</button>}
+        {running && <button onClick={() => kill.mutate({ id: c.id })} style={{...btnStyle, color:'#ef4444'}} disabled={kill.isPending}>Kill</button>}
         <button onClick={() => { if (confirm('Destroy container?')) destroy.mutate(c.id) }} style={dangerBtn} disabled={destroy.isPending}>✕</button>
       </td>
     </tr>
@@ -149,6 +161,9 @@ function CreateForm({ onDone }: { onDone: () => void }) {
   const [memory, setMemory] = useState('')
   const [dns, setDns] = useState('')
   const [volumes, setVolumes] = useState('')
+  const [workdir, setWorkdir] = useState('')
+  const [hostname, setHostname] = useState('')
+  const [env, setEnv] = useState('')
   const run = useRunContainer()
   const { data: profileList } = useProfiles()
 
@@ -169,6 +184,16 @@ function CreateForm({ onDone }: { onDone: () => void }) {
         if (memory) body.memory = memory
         if (dns) body.dns = [dns]
         if (volumes) body.volumes = volumes.split(',').map(v => v.trim()).filter(Boolean)
+        if (workdir) body.workdir = workdir
+        if (hostname) body.hostname = hostname
+        if (env) {
+          const envObj: Record<string, string> = {}
+          for (const pair of env.split(',')) {
+            const [k, ...rest] = pair.split('=')
+            if (k && rest.length) envObj[k.trim()] = rest.join('=').trim()
+          }
+          if (Object.keys(envObj).length) body.env = envObj
+        }
       }
       run.mutate(body as Parameters<ReturnType<typeof useRunContainer>['mutate']>[0], { onSuccess: onDone })
     }} style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
@@ -197,6 +222,9 @@ function CreateForm({ onDone }: { onDone: () => void }) {
             <label style={label}>Memory <input value={memory} onChange={e => setMemory(e.target.value)} placeholder="e.g. 512M" style={input} /></label>
             <label style={label}>DNS <input value={dns} onChange={e => setDns(e.target.value)} placeholder="e.g. 8.8.8.8" style={input} /></label>
             <label style={{ ...label, gridColumn: '1 / -1' }}>Volumes <input value={volumes} onChange={e => setVolumes(e.target.value)} placeholder="/host/path:/container/path (comma-separated)" style={input} /></label>
+            <label style={label}>Workdir <input value={workdir} onChange={e => setWorkdir(e.target.value)} placeholder="/app" style={input} /></label>
+            <label style={label}>Hostname <input value={hostname} onChange={e => setHostname(e.target.value)} placeholder="mybox" style={input} /></label>
+            <label style={{ ...label, gridColumn: '1 / -1' }}>Env <input value={env} onChange={e => setEnv(e.target.value)} placeholder="FOO=bar,BAR=baz" style={input} /></label>
           </div>
         </GlassBox>
       )}

@@ -396,14 +396,29 @@ class CliBackend(Backend):
 
     async def registry_login(
         self, server: str, username: str | None = None,
-        password_stdin: bool = False,
+        password: str | None = None,
     ) -> None:
         cmd = ["registry", "login"]
         if username:
             cmd += ["--username", username]
-        if password_stdin:
+        if password is not None:
             cmd.append("--password-stdin")
         cmd.append(server)
+        if password is not None:
+            proc = await asyncio.create_subprocess_exec(
+                self._binary, *cmd,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await proc.communicate(input=password.encode())
+            if proc.returncode != 0:
+                raise BackendError(
+                    message=f"registry login failed for {server}",
+                    exit_code=proc.returncode or 1,
+                    stderr=stderr.decode("utf-8", errors="replace").strip()[:500],
+                )
+            return
         await _run_cli_impl(*cmd, binary=self._binary)
 
     async def registry_logout(self, server: str) -> None:

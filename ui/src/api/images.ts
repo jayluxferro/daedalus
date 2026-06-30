@@ -85,3 +85,29 @@ export function useLoadImage() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['images'] }),
   })
 }
+
+export function useSaveImage() {
+  return useMutation({
+    mutationFn: ({ image, output }: { image: string; output: string }) =>
+      apiPost<{ status: string; image: string; path: string }>(
+        `/images/save?image=${encodeURIComponent(image)}&output=${encodeURIComponent(output)}`,
+      ),
+  })
+}
+
+export function useTagImage() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ source, target }: { source: string; target: string }) =>
+      apiPost<{ status: string }>('/images/tag', { source, target }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['images'] }),
+  })
+}
+
+export function usePruneImages() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: () => apiPost<{ status: string; removed: string[]; count: number }>('/images/prune'),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['images'] }),
+  })
+}

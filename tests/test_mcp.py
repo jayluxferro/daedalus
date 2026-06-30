@@ -8,11 +8,16 @@ from daedalus.mcp import server as mcp_server
 
 _EXPECTED_TOOLS = {
     "daedalus_health", "daedalus_run", "daedalus_list", "daedalus_inspect",
-    "daedalus_start", "daedalus_stop", "daedalus_destroy", "daedalus_exec",
-    "daedalus_logs", "daedalus_image_pull", "daedalus_image_list",
-    "daedalus_image_delete", "daedalus_image_inspect", "daedalus_image_push",
-    "daedalus_image_build", "daedalus_image_load",
-    "daedalus_system_status", "daedalus_audit", "daedalus_experiments",
+    "daedalus_start", "daedalus_stop", "daedalus_kill", "daedalus_destroy",
+    "daedalus_exec", "daedalus_logs",
+    "daedalus_image_pull", "daedalus_image_list", "daedalus_image_delete",
+    "daedalus_image_inspect", "daedalus_image_push", "daedalus_image_build",
+    "daedalus_image_load", "daedalus_image_save", "daedalus_image_tag",
+    "daedalus_image_prune",
+    "daedalus_system_status", "daedalus_system_restart",
+    "daedalus_builder_status", "daedalus_builder_start", "daedalus_builder_stop",
+    "daedalus_registry_login", "daedalus_registry_logout",
+    "daedalus_audit", "daedalus_experiments",
     "daedalus_dns_list", "daedalus_dns_create", "daedalus_dns_delete",
     "daedalus_profiles",
 }
@@ -38,11 +43,13 @@ def test_mcp_tool_manager_registers_all() -> None:
 @pytest.mark.asyncio
 async def test_mcp_stdio_lists_tools() -> None:
     """MCP stdio handshake exposes every registered tool."""
+    import sys
+
     from mcp import ClientSession
     from mcp.client.stdio import StdioServerParameters, stdio_client
 
     params = StdioServerParameters(
-        command="python", args=["-m", "daedalus.mcp.server"],
+        command=sys.executable, args=["-m", "daedalus.mcp.server"],
     )
     async with stdio_client(params) as (read, write):
         async with ClientSession(read, write) as session:
