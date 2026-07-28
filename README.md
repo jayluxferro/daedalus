@@ -60,6 +60,19 @@ python3 --version
 
 ---
 
+## Supported Images
+
+Any OCI-compatible Linux image works. Common choices:
+
+| Image | Best for | Pull command |
+|---|---|---|
+| `alpine:latest` | Minimal (~5MB), fast boot | `daedalus image-pull alpine:latest` |
+| `debian:latest` | Full Linux tools (curl, apt, tcpdump) | `daedalus image-pull debian:latest` |
+| `ubuntu:latest` | Desktop/server workloads | `daedalus image-pull ubuntu:latest` |
+| `kalilinux/kali-rolling:latest` | Penetration testing, tcpdump pre-installed | `daedalus image-pull kalilinux/kali-rolling:latest` |
+
+Use **Alpine** for speed, **Debian** for proxy/Burp/pcap analysis (has proper curl + SSL).
+
 ## Quick Start
 
 ```bash
@@ -80,8 +93,8 @@ container system kernel set --recommended
 # 5. Pull your first image
 daedalus image-pull alpine:latest
 
-# 6. Run a container
-daedalus run alpine:latest --command "echo hello from daedalus"
+# 6. Run a container (detached, auto-keepalive)
+daedalus run alpine:latest -d --command "echo hello from daedalus"
 
 # 7. See it
 daedalus ls --all
@@ -101,8 +114,8 @@ daedalus probe                        # Host capability manifest
 daedalus system-status                # Daemon + version + container counts
 
 # Containers
-daedalus run alpine:latest            # Create + start (general profile, detached)
-daedalus run alpine:latest -p detonation --command "sleep 300"
+daedalus run alpine:latest -d         # Create + start (detached, auto-keepalive)
+daedalus run debian:latest -d -p detonation  # Detonation profile for malware analysis
 daedalus ls                           # List running
 daedalus ls --all                     # List all (including stopped)
 daedalus inspect <id>                 # Full JSON inspect
@@ -177,7 +190,7 @@ curl http://127.0.0.1:8420/health | jq .
 curl http://127.0.0.1:8420/containers?all=true | jq .
 curl -X POST http://127.0.0.1:8420/containers \
   -H 'Content-Type: application/json' \
-  -d '{"image":"alpine:latest","detach":true,"command":["sleep","3600"]}'
+  -d '{"image":"alpine:latest","detach":true}'
 curl http://127.0.0.1:8420/system/audit?limit=5 | jq .
 ```
 
@@ -209,15 +222,14 @@ open http://127.0.0.1:8420/ui
 
 1. Go to **Containers** page
 2. Click **+ New**
-3. Choose an image (e.g. `alpine:latest`)
+3. Choose an image (e.g. `alpine:latest` for speed, `debian:latest` for proxy tools)
 4. Select a profile — `general` for normal use, `detonation` for malware analysis
-5. Keep **Detach** checked (container runs in background)
-6. Add a command like `sleep 3600` (keeps it alive)
+5. Keep **Detach** checked — the container stays running automatically
 7. Click **Create & Run**
 
 **Opening a terminal:**
 
-1. Create a running container (detached with `sleep 3600`)
+1. Create a running container (detached with any profile)
 2. Click **Term** on the container row
 3. Type commands at the `λ` prompt — press Enter to execute
 
@@ -413,7 +425,7 @@ container system kernel set --recommended
 Networking is not yet wired in container v0.1.0. DNS control via `--dns` flags still works.
 
 **Containers go straight to "stopped" state**
-Make sure Detach is checked AND you've provided a command like `sleep 3600`. Alpine's default CMD `/bin/sh` exits instantly without stdin in detached mode.
+Detached containers automatically stay alive in the background. If you override the command, make sure it doesn't exit immediately — some default CMDs like `/bin/sh` need stdin and exit instantly when detached. Leave the command blank for automatic keep-alive.
 
 **"No module named daedalus"**
 ```bash
