@@ -24,7 +24,7 @@ from daedalus.core.exceptions import ValidationError
 from daedalus.core.minos import Minos
 
 # Detached with no command: image defaults exit immediately in the background.
-DEFAULT_DETACHED_COMMAND: list[str] = ["sleep", "infinity"]
+DEFAULT_DETACHED_COMMAND: list[str] = ["tail", "-f", "/dev/null"]
 from daedalus.core.policy import Decision, PolicyEngine
 from daedalus.core.store import Artifact, Store
 
@@ -202,6 +202,11 @@ class Forge:
             lab.id, image=image, image_digest="", profile=profile,
             command=command or [], container_name=lab.name,
         )
+        # Inject CA cert if specified (container v0.1.0 only supports
+        # directory volume mounts, so we exec the cert content in)
+        cert_path = kwargs.get("cert_path")
+        if cert_path:
+            await _inject_cert(self._backend, lab.id, cert_path)
         return lab
 
     async def start(
@@ -438,12 +443,28 @@ _RUNSPEC_FIELDS = {
     "memory", "mounts", "tmpfs", "volumes", "kernel", "labels",
     "cidfile", "os", "arch", "dns", "dns_domain", "dns_search", "dns_option", "no_dns",
     "scheme", "disable_progress_updates", "command",
+    "proxy", "cert_path", "no_proxy",
 }
 
 
 def _filter_run_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
     """Filter kwargs to only include valid RunSpec fields."""
     return {k: v for k, v in kwargs.items() if k in _RUNSPEC_FIELDS}
+
+
+async def _inject_cert(backend: Backend, container_id: str, cert_path: str) -> None:
+    """Inject a CA certificate into a running container via exec."""
+    import os as _os
+    if not _os.path.exists(cert_path):
+        return
+    with open(cert_path) as f:
+        cert_content = f.read()
+    # Write cert via exec — escape for shell
+    escaped = cert_content.replace("'", "'\"'\"'")
+    await backend.exec(
+        container_id,
+        ["sh", "-c", f"mkdir -p /usr/local/share/ca-certificates && echo '{escaped}' > /usr/local/share/ca-certificates/daedalus-ca.crt && update-ca-certificates 2>/dev/null || true"],
+    )
 
 
 def _with_profile_label(kwargs: dict[str, Any], profile: str) -> dict[str, Any]:

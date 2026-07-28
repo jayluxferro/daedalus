@@ -85,6 +85,9 @@ class RunRequest(BaseModel):
     dns: list[str] | None = None
     volumes: list[str] | None = None
     mounts: list[str] | None = None
+    proxy: str | None = None
+    cert_path: str | None = None
+    no_proxy: str | None = None
     env: dict[str, str] | None = None
     workdir: str | None = None
     confirm_kernel: bool = False
@@ -271,6 +274,12 @@ async def create_container(req: RunRequest) -> dict[str, Any]:
         overrides["env"] = req.env
     if req.workdir is not None:
         overrides["workdir"] = req.workdir
+    if req.proxy is not None:
+        overrides["proxy"] = req.proxy
+    if req.cert_path is not None:
+        overrides["cert_path"] = req.cert_path
+    if req.no_proxy is not None:
+        overrides["no_proxy"] = req.no_proxy
     overrides["remove"] = req.remove
     kwargs = p.apply(**overrides)
     forge: Any = s["forge"]

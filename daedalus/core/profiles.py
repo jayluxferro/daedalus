@@ -111,6 +111,15 @@ BUILTIN_PROFILES: dict[str, Profile] = {
         dns=["10.0.0.53"],
         dns_domain=["lab.local"],
     ),
+
+    "proxy": Profile(
+        name="proxy",
+        description=(
+            "Routes traffic through an intercepting proxy (Burp Suite, mitmproxy). "
+            "Set proxy host:port via --proxy flag. Mount CA cert via --cert flag. "
+            "Set NO_PROXY exclusions via --no-proxy flag."
+        ),
+    ),
 }
 
 SPECIAL_PROFILES: dict[str, str] = {

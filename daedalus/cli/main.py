@@ -160,6 +160,9 @@ def run(
     mount: Annotated[list[str], typer.Option("--mount", help="Mount spec type=,source=,target=")] = [],
     env: Annotated[list[str], typer.Option("--env", "-e", help="KEY=VALUE")] = [],
     workdir: Annotated[str | None, typer.Option("--workdir", "-w")] = None,
+    proxy: Annotated[str | None, typer.Option("--proxy", help="Proxy host:port for Burp/mitmproxy")] = None,
+    cert: Annotated[str | None, typer.Option("--cert", help="Path to PEM CA cert to inject")] = None,
+    no_proxy: Annotated[str | None, typer.Option("--no-proxy", help="NO_PROXY exclusion list")] = None,
     json_output: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:
     """Create and start a container."""
@@ -168,6 +171,12 @@ def run(
     kwargs = p.apply()
     if kernel:
         kwargs["kernel"] = kernel
+    if proxy:
+        kwargs["proxy"] = proxy
+    if cert:
+        kwargs["cert_path"] = cert
+    if no_proxy:
+        kwargs["no_proxy"] = no_proxy
     if volume:
         kwargs["volumes"] = volume
     if mount:

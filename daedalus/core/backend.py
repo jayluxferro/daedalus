@@ -95,6 +95,11 @@ class RunSpec:
     scheme: str | None = None       # --scheme  (http, https, auto)
     disable_progress_updates: bool = False  # --disable-progress-updates
 
+    # Analysis / instrumentation
+    proxy: str | None = None          # HTTP_PROXY/HTTPS_PROXY host:port
+    cert_path: str | None = None      # PEM cert to volume-mount into container
+    no_proxy: str | None = None       # NO_PROXY exclusion list
+
     # Command to run (after image name)
     command: list[str] | None = None
 
@@ -194,6 +199,19 @@ class RunSpec:
             flags += ["--scheme", self.scheme]
         if self.disable_progress_updates:
             flags.append("--disable-progress-updates")
+
+        # --- proxy (Burp Suite / MITM analysis) ---
+        if self.proxy:
+            flags += ["--env", f"HTTP_PROXY=http://{self.proxy}"]
+            flags += ["--env", f"HTTPS_PROXY=http://{self.proxy}"]
+        if self.no_proxy:
+            flags += ["--env", f"NO_PROXY={self.no_proxy}"]
+
+        # --- cert injection (via forge after container start) ---
+        # container v0.1.0 volume mounts only support directories, not
+        # individual files.  Cert injection happens at the Forge level
+        # after the container is running: the cert file content is piped
+        # via exec into /usr/local/share/ca-certificates/.
 
         # Image comes after all flags
         tail.append(self.image)
