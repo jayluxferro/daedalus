@@ -272,8 +272,87 @@ Add to your `mcp.json` or `~/.claude/config.json`:
 | `fuzz` | Kernel fuzzing / escape research | KASAN kernel |
 | `isolated` | Air-gapped analysis | No DNS |
 | `deception` | Network deception labs | Fake DNS resolver, custom domains |
+| `proxy` | Proxy analysis (Burp/mitmproxy) | Routes through --proxy, injects CA cert via --cert |
 
 Use `general` when you just want a Linux VM. Use `detonation` when you're analyzing suspicious binaries.
+
+---
+
+## Proxy & Cert Injection
+
+Route container traffic through Burp Suite or mitmproxy for MITM analysis. Proxy and cert are fully optional across all surfaces (CLI, API, MCP).
+
+### CLI
+
+```bash
+# Convert Burp's DER CA cert to PEM
+openssl x509 -inform DER -in burp.der -out /tmp/burp-ca.pem
+
+# Run with proxy + cert (both optional)
+daedalus run debian:latest -d --proxy 192.168.64.1:8083 \
+  --cert /tmp/burp-ca.pem --name analysis
+
+# Verify proxy env vars are set system-wide
+daedalus exec analysis -- sh -c "echo \$HTTP_PROXY \$http_proxy"
+# HTTP_PROXY=http://192.168.64.1:8083 http_proxy=http://192.168.64.1:8083
+
+# HTTPS through Burp with cert trust
+daedalus exec analysis -- curl -s -x http://192.168.64.1:8083 https://sperixlabs.org/
+```
+
+**Critical**: Use the host gateway IP (`192.168.64.1`), not `127.0.0.1` — inside the container, `127.0.0.1` is the container's own loopback.
+
+### Proxy without cert (works)
+
+```bash
+daedalus run alpine:latest -d --proxy 192.168.64.1:8083 --name proxy-only
+```
+
+### Cert without proxy (works)
+
+```bash
+daedalus run debian:latest -d --cert /tmp/burp-ca.pem --name cert-only
+```
+
+### With NO_PROXY exclusions
+
+```bash
+daedalus run debian:latest -d --proxy 192.168.64.1:8083 \
+  --no-proxy "localhost,127.0.0.1,.internal" --name analysis
+```
+
+### API
+
+```bash
+curl -X POST http://127.0.0.1:8420/containers \
+  -H 'Content-Type: application/json' \
+  -d '{"image":"debian:latest","proxy":"192.168.64.1:8083","cert_path":"/tmp/burp-ca.pem","command":["tail","-f","/dev/null"]}'
+```
+
+### MCP
+
+```json
+{
+  "image": "debian:latest",
+  "proxy": "192.168.64.1:8083",
+  "cert_path": "/tmp/burp-ca.pem"
+}
+```
+
+### Verified across all 7 profiles
+
+Proxy + cert tested and verified with `general`, `detonation`, `bench`, `fuzz`, `isolated`, `deception`, and `proxy` profiles. All four proxy env vars (`HTTP_PROXY`, `http_proxy`, `HTTPS_PROXY`, `https_proxy`) are set system-wide. Cert is injected at `/etc/ssl/certs/daedalus-ca.pem`.
+
+### tcpdump / Wireshark
+
+```bash
+daedalus exec analysis -- apt-get install -y tcpdump
+daedalus exec analysis -- tcpdump -i eth0 -w /tmp/capture.pcap port 8083 &
+# ... make proxied requests ...
+daedalus exec analysis -- tcpdump -r /tmp/capture.pcap
+```
+
+The container's network interface is `bridge100` on the host. For host-side capture: `tcpdump -i bridge100 -w capture.pcap`.
 
 ---
 
@@ -313,8 +392,10 @@ cd ui && npm run dev
 
 ```
 mypy --strict daedalus/     → Success: no issues found in 23 source files
-pytest -m unit              → 108 passed
+pytest -m unit              → 115 passed
 pytest -m integration       → 11 passed (requires container daemon)
+Proxy across 7 profiles     → All pass (CLI + API + MCP surfaces)
+UI build                    → TypeScript clean, 8/8 checks pass
 ruff check                  → cosmetic only (E501, SIM*, UP042)
 Import-time I/O             → zero subprocess calls
 ```
