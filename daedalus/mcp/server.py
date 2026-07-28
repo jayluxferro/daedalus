@@ -213,6 +213,9 @@ async def daedalus_run(
     volumes: list[str] | None = None,
     mounts: list[str] | None = None,
     env: dict[str, str] | None = None,
+    proxy: str | None = None,
+    cert_path: str | None = None,
+    no_proxy: str | None = None,
     workdir: str | None = None,
     confirm_kernel: bool = False,
     ctx: Context | None = None,
@@ -222,10 +225,13 @@ async def daedalus_run(
     Defaults to the 'detonation' profile for maximum isolation.
     Use profile='bench' for benchmarking, 'isolated' for air-gapped,
     'fuzz' for kernel fuzzing, 'deception' for network labs.
+    Pass --proxy host:port to route traffic through Burp/mitmproxy.
+    Pass --cert /path/to/ca.pem to inject a CA certificate.
 
     Example:
         daedalus_run(image="alpine:latest")
         daedalus_run(image="ubuntu:24.04", profile="bench", name="test")
+        daedalus_run(image="debian:latest", proxy="192.168.64.1:8083", cert_path="/tmp/burp-ca.pem")
     """
     assert ctx is not None
     dc = _get_ctx(ctx)
@@ -248,6 +254,12 @@ async def daedalus_run(
             overrides["env"] = env
         if workdir is not None:
             overrides["workdir"] = workdir
+        if proxy is not None:
+            overrides["proxy"] = proxy
+        if cert_path is not None:
+            overrides["cert_path"] = cert_path
+        if no_proxy is not None:
+            overrides["no_proxy"] = no_proxy
         overrides["remove"] = remove
         kwargs = p.apply(**overrides)
         await ctx.report_progress(10, 100, "Creating container...")
@@ -290,6 +302,9 @@ async def daedalus_create(
     volumes: list[str] | None = None,
     mounts: list[str] | None = None,
     env: dict[str, str] | None = None,
+    proxy: str | None = None,
+    cert_path: str | None = None,
+    no_proxy: str | None = None,
     workdir: str | None = None,
     confirm_kernel: bool = False,
     ctx: Context | None = None,
@@ -316,6 +331,12 @@ async def daedalus_create(
             overrides["env"] = env
         if workdir is not None:
             overrides["workdir"] = workdir
+        if proxy is not None:
+            overrides["proxy"] = proxy
+        if cert_path is not None:
+            overrides["cert_path"] = cert_path
+        if no_proxy is not None:
+            overrides["no_proxy"] = no_proxy
         overrides["remove"] = remove
         kwargs = p.apply(**overrides)
         lab = await dc.forge.create(
