@@ -453,18 +453,28 @@ def _filter_run_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
 
 
 async def _inject_cert(backend: Backend, container_id: str, cert_path: str) -> None:
-    """Inject a CA certificate into a running container via exec."""
+    """Inject a CA certificate into a running container via exec.
+
+    Handles both Debian/Ubuntu (/usr/local/share/ca-certificates/) and
+    Alpine (/usr/local/share/ca-certificates/) paths.  The cert is
+    written and update-ca-certificates is called if available.
+    """
     import os as _os
     if not _os.path.exists(cert_path):
         return
     with open(cert_path) as f:
         cert_content = f.read()
-    # Write cert via exec — escape for shell
+    # Escape single quotes for shell
     escaped = cert_content.replace("'", "'\"'\"'")
-    await backend.exec(
-        container_id,
-        ["sh", "-c", f"mkdir -p /usr/local/share/ca-certificates && echo '{escaped}' > /usr/local/share/ca-certificates/daedalus-ca.crt && update-ca-certificates 2>/dev/null || true"],
+    script = (
+        "mkdir -p /usr/local/share/ca-certificates /etc/ssl/certs && "
+        f"echo '{escaped}' > /usr/local/share/ca-certificates/daedalus-ca.crt && "
+        f"cp /usr/local/share/ca-certificates/daedalus-ca.crt /etc/ssl/certs/daedalus-ca.pem 2>/dev/null; "
+        "update-ca-certificates 2>/dev/null || "
+        "update-ca-trust 2>/dev/null || "
+        "c_rehash /etc/ssl/certs 2>/dev/null || true"
     )
+    await backend.exec(container_id, ["sh", "-c", script])
 
 
 def _with_profile_label(kwargs: dict[str, Any], profile: str) -> dict[str, Any]:
