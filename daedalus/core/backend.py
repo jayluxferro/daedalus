@@ -204,8 +204,12 @@ class RunSpec:
         if self.proxy:
             flags += ["--env", f"HTTP_PROXY=http://{self.proxy}"]
             flags += ["--env", f"HTTPS_PROXY=http://{self.proxy}"]
+            # BusyBox / Alpine wget uses lowercase variants
+            flags += ["--env", f"http_proxy=http://{self.proxy}"]
+            flags += ["--env", f"https_proxy=http://{self.proxy}"]
         if self.no_proxy:
             flags += ["--env", f"NO_PROXY={self.no_proxy}"]
+            flags += ["--env", f"no_proxy={self.no_proxy}"]
 
         # --- cert injection (via forge after container start) ---
         # container v0.1.0 volume mounts only support directories, not
