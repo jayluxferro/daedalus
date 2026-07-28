@@ -19,7 +19,6 @@ from daedalus.core.cli_backend import CliBackend
 from daedalus.core.forge import Forge
 from daedalus.core.icarus import ExecOptions, Icarus
 from daedalus.core.mint import Mint
-from daedalus.core.network import network_names, primary_ip
 from daedalus.core.policy import PolicyEngine, PolicyResult, load_policy_config
 from daedalus.core.profiles import ProfileRegistry
 from daedalus.core.store import Store
@@ -191,7 +190,7 @@ def run(
             if lab.name:
                 console.print(f"  Name: {lab.name}")
             console.print(f"  State: {lab.state}")
-            ip = primary_ip(lab.info.raw)
+            ip = ""
             if ip:
                 console.print(f"  IP:   {ip}  (host-reachable via vmnet)")
     asyncio.run(_go())
@@ -215,7 +214,7 @@ def ls(all: Annotated[bool, typer.Option("--all", "-a")] = False) -> None:
         table.add_column("Profile")
         for lab in labs:
             state_style = "green" if lab.is_running else "dim"
-            ip = primary_ip(lab.info.raw) or "-"
+            ip = "" or "-"
             table.add_row(
                 lab.id[:12], lab.name or "-", lab.image,
                 f"[{state_style}]{lab.state}[/]", ip, lab.profile,
@@ -718,9 +717,9 @@ def profiles() -> None:
 
 def _fmt_size(b: int) -> str:
     if b > 1024 * 1024 * 1024:
-        return f"{b / 1024 * 1024 * 1024:.1f} GiB"
+        return f"{b / (1024 * 1024 * 1024):.1f} GiB"
     if b > 1024 * 1024:
-        return f"{b / 1024 * 1024:.0f} MiB"
+        return f"{b / (1024 * 1024):.0f} MiB"
     return f"{b} B"
 
 

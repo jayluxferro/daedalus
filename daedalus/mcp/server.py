@@ -31,7 +31,6 @@ from daedalus.core.policy import PolicyEngine, PolicyResult, load_policy_config
 from daedalus.core.profiles import ProfileRegistry
 from daedalus.core.store import Store
 from daedalus.core.talos import Talos
-from daedalus.core.network import network_names, primary_ip
 
 # ==========================================================================
 # Lifespan — no module-level I/O
@@ -262,8 +261,8 @@ async def daedalus_run(
                      {"id": lab.id})
         return _ok({"id": lab.id, "name": lab.name, "image": lab.image,
                     "state": lab.state, "profile": lab.profile,
-                    "ip": primary_ip(lab.info.raw),
-                    "networks": network_names(lab.info.raw)})
+                    "ip": "",
+                    "networks": []})
     except DaedalusError as e:
         _audit_agent(dc, "run", {"image": image}, error=e.message)
         return _err(e)
@@ -350,8 +349,8 @@ async def daedalus_list(all: bool = False, ctx: Context | None = None) -> str:
         return json.dumps([{
             "id": lab.id, "name": lab.name, "image": lab.image,
             "state": lab.state, "profile": lab.profile,
-            "ip": primary_ip(lab.info.raw),
-            "networks": network_names(lab.info.raw),
+            "ip": "",
+            "networks": [],
         } for lab in labs])
     except DaedalusError as e:
         return _err(e)

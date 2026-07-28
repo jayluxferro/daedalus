@@ -1,6 +1,6 @@
 [project]
 name = "daedalus"
-version = "0.1.0"
+version = "1.0.0"
 description = "Detonation, Analysis & Experimentation — Daedalus Architecture for Linux container Units & Sandboxing"
 readme = "ARCHITECTURE.md"
 requires-python = ">=3.12"

@@ -22,7 +22,6 @@ from daedalus.core.backend import Backend, ContainerInfo, RunSpec
 from daedalus.core.capabilities import CapabilityManifest
 from daedalus.core.exceptions import ValidationError
 from daedalus.core.minos import Minos
-from daedalus.core.network import has_network_addresses
 
 # Detached with no command: image defaults exit immediately in the background.
 DEFAULT_DETACHED_COMMAND: list[str] = ["sleep", "infinity"]
@@ -326,10 +325,7 @@ class Forge:
             else:
                 lab = Labyrinth(info=info)
                 self._labyrinths[info.id] = lab
-            if (
-                lab.info.state == lab.info.state.RUNNING
-                and not has_network_addresses(lab.info.raw)
-            ):
+            if lab.info.state == lab.info.state.RUNNING:
                 with contextlib.suppress(Exception):
                     lab.info = await self._backend.inspect(lab.id)
             lab.profile = self._resolve_profile(lab)

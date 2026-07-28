@@ -65,7 +65,6 @@ from daedalus.core.policy import PolicyEngine, PolicyResult, load_policy_config
 from daedalus.core.profiles import ProfileRegistry
 from daedalus.core.store import Store
 from daedalus.core.talos import Talos
-from daedalus.core.network import network_names, primary_ip
 
 # ==========================================================================
 # Request models
@@ -123,8 +122,8 @@ def _container_dict(lab: Any) -> dict[str, Any]:
         "image": lab.image,
         "state": lab.state,
         "profile": lab.profile,
-        "ip": primary_ip(raw),
-        "networks": network_names(raw),
+        "ip": "",
+        "networks": [],
     }
 
 
@@ -449,74 +448,6 @@ async def container_logs_stream(
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
     )
-
-
-@app.websocket("/containers/{container_id}/exec")
-async def container_exec_ws(websocket: WebSocket, container_id: str) -> None:
-    """Interactive terminal via Icarus PTY shell (audited)."""
-    await websocket.accept()
-    s = _get_state()
-    icarus: Icarus = s["icarus"]
-    session = None
-    master_fd: int | None = None
-    loop = asyncio.get_running_loop()
-    out_q: asyncio.Queue[bytes | None] = asyncio.Queue()
-
-    def _on_pty_readable() -> None:
-        if master_fd is None:
-            return
-        try:
-            data = os.read(master_fd, 4096)
-            out_q.put_nowait(data if data else None)
-        except OSError:
-            out_q.put_nowait(None)
-
-    try:
-        session = await icarus.spawn_shell(
-            container_id, actor="service", actor_kind=ActorKind.SERVICE,
-        )
-        master_fd = session.master_fd
-        loop.add_reader(master_fd, _on_pty_readable)
-
-        async def pump_pty_to_ws() -> None:
-            while True:
-                chunk = await out_q.get()
-                if not chunk:
-                    break
-                await websocket.send_bytes(chunk)
-
-        async def pump_ws_to_pty() -> None:
-            while True:
-                msg = await websocket.receive()
-                if msg["type"] == "websocket.disconnect":
-                    break
-                if msg.get("bytes") and master_fd is not None:
-                    os.write(master_fd, msg["bytes"])
-                elif text := msg.get("text"):
-                    if master_fd is not None:
-                        os.write(master_fd, text.encode())
-
-        pty_task = asyncio.create_task(pump_pty_to_ws())
-        try:
-            await pump_ws_to_pty()
-        finally:
-            pty_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await pty_task
-    except WebSocketDisconnect:
-        pass
-    except Exception as e:
-        try:
-            await websocket.send_text(f"\r\n\x1b[31m{e}\x1b[0m\r\n")
-        except Exception:
-            pass
-    finally:
-        if master_fd is not None:
-            loop.remove_reader(master_fd)
-        if session is not None:
-            await icarus.close_shell(
-                session, actor="service", actor_kind=ActorKind.SERVICE,
-            )
 
 
 @app.get("/containers/{container_id}/report")
