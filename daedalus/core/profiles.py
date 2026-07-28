@@ -93,9 +93,9 @@ BUILTIN_PROFILES: dict[str, Profile] = {
     "fuzz": Profile(
         name="fuzz",
         description=(
-            "For kernel fuzzing and escape research. KASAN kernel."
+            "For kernel fuzzing and escape research. "
+            "Pass --kernel /path/to/kasan-kernel at runtime."
         ),
-        kernel="kasan",
     ),
 
     "isolated": Profile(
