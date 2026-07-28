@@ -2,62 +2,237 @@
 
 **D**etonation, **A**nalysis & **E**xperimentation — **D**aedalus **A**rchitecture for **L**inux container **U**nits & **S**andboxing
 
-A security-research control plane built on Apple's `container` runtime. DAEDALUS turns the one-VM-per-container architecture of Apple silicon into a fleet of disposable, hardware-isolated sandboxes — drivable by humans (CLI), services (HTTP), and autonomous agents (MCP).
+A security-research control plane built on Apple's `container` runtime. DAEDALUS turns the one-VM-per-container architecture of Apple silicon into a fleet of disposable, hardware-isolated sandboxes — drivable by humans (CLI), services (HTTP API), and autonomous agents (MCP), all through one core engine.
 
-## Requirements
+> In myth, Daedalus built the Labyrinth to contain the Minotaur — a maze nothing escapes.
 
-- macOS 26+ (Tahoe)
-- Apple silicon (arm64)
-- `container` installed at `/usr/local/bin/container`
-- Python 3.12+
+---
 
-## Install
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────┐
+│                    CONSUMERS                         │
+│  CLI (Typer)    HTTP API (FastAPI)    MCP (FastMCP) │
+├─────────────────────────────────────────────────────┤
+│                   CORE ENGINE                        │
+│  forge      → lifecycle + system                    │
+│  icarus     → exec, logs                            │
+│  mint       → images (pull, list, tag, delete)      │
+│  talos      → DNS, network topology                 │
+│  ariadne    → instrumentation, kernel variants      │
+│  minos      → forensic analysis, risk scoring       │
+├─────────────────────────────────────────────────────┤
+│             CROSS-CUTTING                            │
+│  profiles   → named security postures               │
+│  policy     → pre-execution guardrails              │
+│  audit      → tamper-evident operation log           │
+│  store      → experiment manifests + artifacts      │
+├─────────────────────────────────────────────────────┤
+│              BACKEND (pluggable)                     │
+│  CliBackend (L1) → containers CLI --format json     │
+├─────────────────────────────────────────────────────┤
+│            Apple container runtime                   │
+│          (Virtualization.framework)                  │
+│         One lightweight VM per container             │
+└─────────────────────────────────────────────────────┘
+```
+
+---
+
+## Prerequisites
+
+- **macOS 26+** (Tahoe)
+- **Apple silicon** (arm64)
+- **container** installed at `/usr/local/bin/container` (v0.1.0+)
+- **Python 3.12+**
+- **uv** package manager
+- **Node.js 22+** (for UI development only)
+
+Check your system:
 
 ```bash
-git clone <this-repo>
+sw_vers                           # macOS version
+uname -m                          # should be arm64
+which container && container --version
+python3 --version
+```
+
+---
+
+## Quick Start
+
+```bash
+# 1. Clone
+git clone https://github.com/jayluxferro/daedalus
 cd daedalus
+
+# 2. Install Python dependencies
 uv venv && source .venv/bin/activate
 uv pip install -e ".[dev]"
-```
 
-## Quick start
+# 3. Start the container daemon (required for anything to work)
+container system start --disable-kernel-install
 
-```bash
-# Check what your host supports
-daedalus probe
+# 4. Install a kernel (required once)
+container system kernel set --recommended
 
-# Pull an image
+# 5. Pull your first image
 daedalus image-pull alpine:latest
 
-# Run a disposable container (detonation profile by default)
-daedalus run alpine:latest --command "echo hello"
+# 6. Run a container
+daedalus run alpine:latest --command "echo hello from daedalus"
 
-# List containers
+# 7. See it
 daedalus ls --all
-
-# Execute a command inside a running container
-daedalus exec <id> uname -a
-
-# Fetch logs
-daedalus logs <id>
-
-# Destroy a container
-daedalus destroy <id> --confirm
 ```
 
-## Surfaces
+---
 
-| Surface | Entry | For |
+## Consumer Surfaces
+
+DAEDALUS has three consumer surfaces — use whichever fits your workflow.
+
+### 1. CLI (Terminal)
+
+```bash
+# System
+daedalus probe                        # Host capability manifest
+daedalus system-status                # Daemon + version + container counts
+
+# Containers
+daedalus run alpine:latest            # Create + start (general profile, detached)
+daedalus run alpine:latest -p detonation --command "sleep 300"
+daedalus ls                           # List running
+daedalus ls --all                     # List all (including stopped)
+daedalus inspect <id>                 # Full JSON inspect
+daedalus exec <id> uname -a           # Run command inside
+daedalus logs <id>                    # View logs
+daedalus logs <id> --boot             # Boot-time logs
+daedalus destroy <id> --confirm       # Stop + delete
+
+# Images
+daedalus image-pull debian:latest     # Pull from registry
+daedalus image-list                   # List local images
+
+# Profiles
+daedalus profiles                     # List security profiles
+```
+
+**All CLI commands:**
+
+| Command | Description |
+|---|---|
+| `probe` | Host capability manifest |
+| `run` | Create and start a container |
+| `ls` | List containers |
+| `inspect` | Inspect a container |
+| `exec` | Execute command inside container |
+| `logs` | Fetch container logs |
+| `destroy` | Stop + delete (requires --confirm) |
+| `image-pull` | Pull image from registry |
+| `image-list` | List local images |
+| `system-status` | Daemon + version + container count |
+| `profiles` | List security profiles |
+
+### 2. HTTP API (REST + SSE + WebSocket)
+
+Start the server:
+
+```bash
+python -m daedalus.api.server
+# → Uvicorn running on http://127.0.0.1:8420
+# → API docs at http://127.0.0.1:8420/docs
+# → Labyrinth Control Center UI at http://127.0.0.1:8420/ui
+```
+
+**API endpoints:**
+
+| Method | Path | Description |
 |---|---|---|
-| **CLI** | `daedalus` | Humans |
-| **HTTP API** | `python -m daedalus.api.server` (port 8420) | Services, web UIs |
-| **MCP** | `python -m daedalus.mcp.server` | Autonomous agents |
+| GET | `/health` | Host capability manifest |
+| GET | `/containers` | List containers (`?all=true` for all) |
+| POST | `/containers` | Create + start a container |
+| GET | `/containers/{id}` | Inspect container |
+| DELETE | `/containers/{id}` | Destroy (`?confirm=true` required) |
+| POST | `/containers/{id}/stop` | Stop a running container |
+| POST | `/containers/{id}/start` | Start a stopped container |
+| POST | `/containers/{id}/exec` | Execute command (`{"command":["echo","hi"]}`) |
+| GET | `/containers/{id}/logs` | Get logs (`?boot=true&tail=50`) |
+| GET | `/containers/{id}/logs/stream` | SSE log stream |
+| GET | `/images` | List images |
+| POST | `/images/pull` | Pull image (`?image=alpine:latest`) |
+| GET | `/images/{name}` | Image detail |
+| DELETE | `/images/{name}` | Delete image |
+| GET | `/profiles` | List security profiles |
+| GET | `/system/status` | Daemon status + counts + disk usage |
+| GET | `/system/audit` | Audit log (`?operation=run&limit=50`) |
+| GET | `/system/events` | SSE container lifecycle events |
+| WS | `/containers/{id}/exec` | WebSocket terminal |
 
-## MCP tools
+**curl examples:**
 
-`daedalus_health` `daedalus_run` `daedalus_start` `daedalus_stop` `daedalus_kill` `daedalus_list` `daedalus_inspect` `daedalus_destroy` `daedalus_exec` `daedalus_logs` `daedalus_image_pull` `daedalus_image_list` `daedalus_image_delete` `daedalus_image_inspect` `daedalus_image_push` `daedalus_image_build` `daedalus_image_load` `daedalus_image_save` `daedalus_image_tag` `daedalus_image_prune` `daedalus_registry_login` `daedalus_registry_logout` `daedalus_builder_status` `daedalus_builder_start` `daedalus_builder_stop` `daedalus_profiles` `daedalus_system_status` `daedalus_system_restart` `daedalus_audit` `daedalus_experiments` `daedalus_dns_list` `daedalus_dns_create` `daedalus_dns_delete`
+```bash
+curl http://127.0.0.1:8420/health | jq .
+curl http://127.0.0.1:8420/containers?all=true | jq .
+curl -X POST http://127.0.0.1:8420/containers \
+  -H 'Content-Type: application/json' \
+  -d '{"image":"alpine:latest","detach":true,"command":["sleep","3600"]}'
+curl http://127.0.0.1:8420/system/audit?limit=5 | jq .
+```
 
-Set up via `mcp.json`:
+### 3. Labyrinth Control Center (Web UI)
+
+The dashboard is served by the API server at `/ui` — no separate process needed.
+
+```bash
+# Start the server (serves both API and UI)
+python -m daedalus.api.server
+
+# Open in browser
+open http://127.0.0.1:8420/ui
+```
+
+**Pages:**
+
+| Page | What it shows |
+|---|---|
+| **Dashboard** | System health, container counts, disk usage, capabilities |
+| **Containers** | Live table (3s polling), search/filter, create form with advanced options, start/stop/destroy, inspect modal |
+| **Terminal** | Interactive xterm.js — type commands, press Enter to execute. Line buffered with ↑ history |
+| **Images** | Image list with name/tag/size/digest, pull dialog, delete |
+| **Logs** | Container selector, boot/stdout toggle, live log stream |
+| **Audit** | Tamper-evident audit trail with filters |
+| **Profiles** | Security profile cards showing configured settings |
+
+**Creating a container in the UI:**
+
+1. Go to **Containers** page
+2. Click **+ New**
+3. Choose an image (e.g. `alpine:latest`)
+4. Select a profile — `general` for normal use, `detonation` for malware analysis
+5. Keep **Detach** checked (container runs in background)
+6. Add a command like `sleep 3600` (keeps it alive)
+7. Click **Create & Run**
+
+**Opening a terminal:**
+
+1. Create a running container (detached with `sleep 3600`)
+2. Click **Term** on the container row
+3. Type commands at the `λ` prompt — press Enter to execute
+
+### 4. MCP Server (Autonomous Agents)
+
+The MCP server lets coding agents (Claude Code, Cursor, etc.) control DAEDALUS.
+
+```bash
+python -m daedalus.mcp.server
+```
+
+**Configuring for Claude Code / synapse / cartograph:**
+
+Add to your `mcp.json` or `~/.claude/config.json`:
+
 ```json
 {
   "mcpServers": {
@@ -69,37 +244,107 @@ Set up via `mcp.json`:
 }
 ```
 
-## Security profiles
+**Available MCP tools:**
 
-| Profile | Description |
+| Tool | Description |
 |---|---|
-| `detonation` | Maximum lockdown — internal DNS, controlled resolver (default) |
-| `bench` | Permissive — for benchmarking and development |
-| `fuzz` | Kernel fuzzing — KASAN kernel |
-| `isolated` | Full network isolation — no DNS |
-| `deception` | Network deception — controlled DNS, fake resolver |
+| `daedalus_health` | Host capability manifest — call first |
+| `daedalus_run` | Create + start container |
+| `daedalus_list` | List containers |
+| `daedalus_inspect` | Inspect container |
+| `daedalus_exec` | Execute command inside container |
+| `daedalus_logs` | Fetch container logs |
+| `daedalus_stop` | Stop a running container |
+| `daedalus_destroy` | Destroy container (requires `confirm=true`) |
+| `daedalus_image_pull` | Pull image from registry |
+| `daedalus_image_list` | List local images |
+| `daedalus_profiles` | List security profiles |
 
-## Architecture
+---
 
-```
-daedalus/
-  core/          # Engine: forge, icarus, mint, talos, ariadne, minos
-  cli/           # Typer CLI
-  api/           # FastAPI REST server
-  mcp/           # MCP server (FastMCP)
-tests/
-  integration/   # Real container CLI tests
-```
+## Security Profiles
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the full design.
+| Profile | Use case | Key settings |
+|---|---|---|
+| `general` | Normal Linux VM use | No restrictions |
+| `detonation` | Malware analysis (default for security) | Controlled DNS, tmpfs for /tmp, no external DNS |
+| `bench` | Benchmarking and development | Permissive |
+| `fuzz` | Kernel fuzzing / escape research | KASAN kernel |
+| `isolated` | Air-gapped analysis | No DNS |
+| `deception` | Network deception labs | Fake DNS resolver, custom domains |
 
-## Quality
+Use `general` when you just want a Linux VM. Use `detonation` when you're analyzing suspicious binaries.
+
+---
+
+## Development
 
 ```bash
-mypy --strict daedalus/     # zero errors
-pytest -m unit -q            # 108 passed
-pytest -m integration -q     # integration tests (requires container daemon)
-DAEDALUS_LIVE=1 pytest tests/integration/test_mcp_live.py -v  # all 42 MCP tools live
+# Install with dev dependencies
+uv pip install -e ".[dev]"
+
+# Run all checks
+mypy --strict daedalus/          # type checking
+ruff check daedalus/ tests/      # linting
+pytest -m unit -q                 # unit tests (fast)
+pytest -m integration -q          # integration tests (requires container daemon)
+
+# UI development
+cd ui
+npm install
+npm run dev                       # Vite HMR, proxies API to :8420
+npm run build                     # production build → ui/dist/
+```
+
+**Running the full stack in dev:**
+
+```bash
+# Terminal 1: API server
+python -m daedalus.api.server
+
+# Terminal 2: UI dev server (auto-reload on changes)
+cd ui && npm run dev
+# → opens http://localhost:5173 with API proxied to :8420
+```
+
+---
+
+## Quality Gates
+
+```
+mypy --strict daedalus/     → Success: no issues found in 23 source files
+pytest -m unit              → 108 passed
+pytest -m integration       → 11 passed (requires container daemon)
+ruff check                  → cosmetic only (E501, SIM*, UP042)
+Import-time I/O             → zero subprocess calls
+```
+
+---
+
+## Troubleshooting
+
+**"Default kernel not configured"**
+```bash
+container system kernel set --recommended
+```
+
+**"failed to find plugin named container-network"**
+Networking is not yet wired in container v0.1.0. DNS control via `--dns` flags still works.
+
+**Containers go straight to "stopped" state**
+Make sure Detach is checked AND you've provided a command like `sleep 3600`. Alpine's default CMD `/bin/sh` exits instantly without stdin in detached mode.
+
+**"No module named daedalus"**
+```bash
+source .venv/bin/activate
+uv pip install -e .
+```
+
+**API returns 503 "not yet initialised"**
+The server just started — wait 1-2 seconds for the lifespan startup to complete, then retry.
+
+**Terminal shows "sh: s: not found" on each keystroke**
+Make sure you're on the latest build — the terminal now uses line buffering (type freely, press Enter to send).
 ```
 
 ## License
