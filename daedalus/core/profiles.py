@@ -78,11 +78,10 @@ BUILTIN_PROFILES: dict[str, Profile] = {
         name="detonation",
         description=(
             "Maximum lockdown for safe malware detonation. "
-            "Internal DNS, controlled resolver, tmpfs for /tmp."
+            "DNS fully blocked, tmpfs for /tmp and /var/tmp."
         ),
         tmpfs=["/tmp", "/var/tmp"],
         no_dns=True,
-        dns=["10.0.0.53"],
     ),
 
     "bench": Profile(

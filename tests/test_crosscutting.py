@@ -32,7 +32,8 @@ class TestProfiles:
     def test_detonation_is_safe(self):
         p = BUILTIN_PROFILES["detonation"]
         assert p.no_dns is True
-        assert p.dns == ["10.0.0.53"]
+        assert p.dns == []
+        assert p.tmpfs == ["/tmp", "/var/tmp"]
 
     def test_bench_is_permissive(self):
         p = BUILTIN_PROFILES["bench"]
@@ -43,7 +44,8 @@ class TestProfiles:
         p = BUILTIN_PROFILES["detonation"]
         kwargs = p.apply()
         assert kwargs["no_dns"] is True
-        assert kwargs["dns"] == ["10.0.0.53"]
+        assert kwargs["dns"] == []
+        assert kwargs["tmpfs"] == ["/tmp", "/var/tmp"]
 
     def test_apply_accepts_overrides(self):
         p = BUILTIN_PROFILES["detonation"]
