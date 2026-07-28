@@ -92,7 +92,7 @@ def _p() -> ProfileRegistry:
 # ==================================================================
 
 
-@app.command()
+@app.command("probe")
 def probe_cmd() -> None:
     """Probe the host and print the capability manifest."""
     m = probe()
@@ -294,7 +294,7 @@ def kill(
 # ==================================================================
 
 
-@app.command()
+@app.command("exec")
 def exec_(
     container_id: str,
     command: Annotated[list[str], typer.Argument(help="Command to execute")],

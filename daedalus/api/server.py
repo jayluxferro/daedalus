@@ -299,7 +299,12 @@ async def inspect_container(container_id: str) -> dict[str, Any]:
     s = _get_state()
     try:
         lab = await s["forge"].inspect(container_id)
-        return lab.info.raw
+        raw = lab.info.raw
+        if not raw or not raw.get("configuration", {}).get("id"):
+            raise HTTPException(status_code=404, detail=f"Container '{container_id}' not found")
+        return raw
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
 
