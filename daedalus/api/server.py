@@ -54,7 +54,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from daedalus.core.audit import ActorKind, AuditLog
-from daedalus.core.capabilities import probe
+from daedalus.core.capabilities import ensure_daemon, probe
 from daedalus.core.cli_backend import CliBackend
 from daedalus.core.exceptions import DaedalusError
 from daedalus.core.backend import BuildSpec
@@ -170,6 +170,7 @@ def _get_state() -> dict[str, Any]:
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    ensure_daemon()
     caps = probe()
     backend = CliBackend(caps)
     audit = AuditLog()

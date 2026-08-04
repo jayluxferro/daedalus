@@ -14,7 +14,7 @@ from rich.console import Console
 from rich.table import Table
 
 from daedalus.core.audit import ActorKind, AuditLog
-from daedalus.core.capabilities import CapabilityManifest, probe
+from daedalus.core.capabilities import CapabilityManifest, ensure_daemon, probe
 from daedalus.core.cli_backend import CliBackend
 from daedalus.core.forge import Forge
 from daedalus.core.icarus import ExecOptions, Icarus
@@ -43,6 +43,7 @@ def _bootstrap() -> None:
     global _caps, _forge, _icarus, _mint, _profiles
     if _caps is not None:
         return
+    ensure_daemon()
     _caps = probe()
     backend = CliBackend(_caps)
     audit = AuditLog()

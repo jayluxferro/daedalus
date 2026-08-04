@@ -21,7 +21,7 @@ from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import ToolAnnotations
 
 from daedalus.core.audit import ActorKind, AuditLog
-from daedalus.core.capabilities import probe
+from daedalus.core.capabilities import ensure_daemon, probe
 from daedalus.core.cli_backend import CliBackend
 from daedalus.core.exceptions import DaedalusError
 from daedalus.core.forge import Forge
@@ -56,6 +56,7 @@ class DaedalusContext:
 @asynccontextmanager
 async def daedalus_lifespan(server: FastMCP) -> AsyncIterator[DaedalusContext]:
     """Initialise DAEDALUS subsystems on server start."""
+    ensure_daemon()
     caps = probe()
     backend = CliBackend(caps)
     audit = AuditLog()

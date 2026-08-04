@@ -163,6 +163,7 @@ def probe(*, container_path: str | None = None) -> CapabilityManifest:
         Optional explicit path.  Auto-detected from ``PATH`` / standard
         locations when not given.
     """
+    ensure_daemon()
     m = CapabilityManifest()
 
     # -- host identity ---------------------------------------------------
@@ -252,6 +253,41 @@ def _probe_daemon(m: CapabilityManifest) -> bool | str:
         return r.returncode == 0
     except Exception:
         return "untested"
+
+
+def ensure_daemon() -> bool:
+    """Ensure the container daemon is running. Start it if not.
+
+    Returns True if the daemon was already running or was started
+    successfully.  Called by the API and MCP server lifespans so
+    the daemon is always available when DAEDALUS is running.
+    """
+    # Check if already running
+    try:
+        r = subprocess.run(
+            ["pgrep", "-f", "container-apiserver"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if r.returncode == 0:
+            return True
+    except Exception:
+        pass
+
+    # Daemon not running — start it
+    try:
+        binary = shutil.which("container") or "container"
+        subprocess.run(
+            [binary, "system", "start", "--disable-kernel-install"],
+            capture_output=True, text=True, timeout=30,
+        )
+        # Verify it started
+        r = subprocess.run(
+            ["pgrep", "-f", "container-apiserver"],
+            capture_output=True, text=True, timeout=5,
+        )
+        return r.returncode == 0
+    except Exception:
+        return False
 
 
 def _flag_inventory(binary: str) -> tuple[set[str], set[str]]:
