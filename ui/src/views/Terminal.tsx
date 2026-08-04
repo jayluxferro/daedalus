@@ -131,7 +131,6 @@ export default function TerminalView({ containerId, onClose }: TerminalViewProps
       if (data === '\x1b[A') {
         if (history.current.length > 0 && historyIdx.current > 0) {
           historyIdx.current--
-          const clearLen = lineBuf.current.length
           t.write('\r\x1b[K' + PROMPT + history.current[historyIdx.current])
           lineBuf.current = history.current[historyIdx.current]
         }
