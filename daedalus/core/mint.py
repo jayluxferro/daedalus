@@ -193,12 +193,14 @@ class Mint:
                 name_part, tag_part = reference.rsplit(":", 1)
             else:
                 name_part, tag_part = reference, "latest"
+            # Enrich with actual image size from inspect (descriptor.size is just the manifest)
+            actual_size = await self._resolve_image_size(reference, descriptor.get("size", 0))
             img = ImageInfo(
                 id=descriptor.get("digest", reference),
                 name=name_part,
                 tag=tag_part,
                 digest=descriptor.get("digest", ""),
-                size=descriptor.get("size", 0),
+                size=actual_size,
                 created_at="",
                 raw=raw,
             )
@@ -206,6 +208,20 @@ class Mint:
             if img.id:
                 self._inventory[img.id] = img
         return result
+
+    async def _resolve_image_size(self, reference: str, fallback: int) -> int:
+        """Get the actual total image size from inspect (sum of variant layers)."""
+        try:
+            data: Any = await self._backend.image_inspect(reference)
+            root: Any = data[0] if isinstance(data, list) and data else data
+            variants: Any = root.get("variants", []) if isinstance(root, dict) else []
+            total = 0
+            for v in variants:
+                if isinstance(v, dict):
+                    total += v.get("size", 0)
+            return total if total > 0 else fallback
+        except Exception:
+            return fallback
 
     async def prune(self) -> builtins.list[str]:
         removed = await self._backend.image_prune()
