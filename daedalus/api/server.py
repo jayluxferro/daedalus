@@ -140,6 +140,7 @@ class ExecRequest(BaseModel):
     env_file: str | None = None
     tty: bool = False
     interactive: bool = False
+    timeout: float = 10.0  # seconds; kills command if still running
 
 
 class BuildRequest(BaseModel):
@@ -401,6 +402,7 @@ async def container_exec(container_id: str, req: ExecRequest) -> dict[str, Any]:
             env_file=req.env_file,
             tty=req.tty,
             interactive=req.interactive,
+            timeout=req.timeout,
         )
         result = await s["icarus"].exec(container_id, req.command, options=opts)
         return {"exit_code": result.exit_code, "stdout": result.stdout,

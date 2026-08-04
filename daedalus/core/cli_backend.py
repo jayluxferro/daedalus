@@ -336,6 +336,7 @@ class CliBackend(Backend):
         workdir: str | None = None,
         env_file: str | None = None,
         interactive: bool = False,
+        timeout: float = 30.0,
     ) -> ExecResult:
         cmd = ["exec", container_id]
         if tty:
@@ -360,7 +361,7 @@ class CliBackend(Backend):
         cmd += argv
 
         exit_code, out, err = await _run_cli_impl(
-            *cmd, binary=self._binary, check=False,
+            *cmd, binary=self._binary, check=False, timeout=timeout,
         )
         return ExecResult(exit_code=exit_code, stdout=out, stderr=err)
 

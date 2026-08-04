@@ -34,6 +34,7 @@ class ExecOptions:
     workdir: str | None = None
     env: dict[str, str] | None = None
     env_file: str | None = None
+    timeout: float = 30.0
 
 
 class Icarus:
@@ -92,6 +93,7 @@ class Icarus:
             interactive=opts.interactive,
             workdir=opts.workdir,
             env_file=opts.env_file,
+            timeout=opts.timeout,
         )
         self._audit.record(
             "exec", actor="icarus", actor_kind=ActorKind.SERVICE,

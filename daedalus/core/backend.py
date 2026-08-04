@@ -432,6 +432,7 @@ class Backend(ABC):
         interactive: bool = False,
         workdir: str | None = None,
         env_file: str | None = None,
+        timeout: float = 30.0,
     ) -> ExecResult:
         """Execute a command inside a running container."""
         ...

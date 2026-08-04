@@ -10,7 +10,7 @@ interface TerminalViewProps {
   onClose?: () => void
 }
 
-const PROMPT = '\r\n\x1b[36mλ \x1b[0m'
+const PROMPT = '\x1b[36mλ \x1b[0m'
 
 export default function TerminalView({ containerId, onClose }: TerminalViewProps) {
   const termRef = useRef<HTMLDivElement>(null)
@@ -22,12 +22,25 @@ export default function TerminalView({ containerId, onClose }: TerminalViewProps
   const historyIdx = useRef(0)
 
   const send = useCallback(async (cmd: string) => {
+    if (cmd === 'exit' || cmd === 'logout') {
+      term.current?.writeln('\r\n\x1b[33mClosing terminal...\x1b[0m')
+      setTimeout(() => onClose?.(), 300)
+      return
+    }
+
     setSending(true)
+    // Auto-wrap interactive commands to batch/non-interactive mode
+    let execCmd: string
+    if (cmd === 'top' || cmd === 'htop') {
+      execCmd = 'top -bn1 2>/dev/null || top -n 1 -b 2>/dev/null || echo "top not available"'
+    } else {
+      execCmd = cmd
+    }
     try {
       const res = await fetch(`/containers/${containerId}/exec`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ command: ['sh', '-c', cmd] }),
+        body: JSON.stringify({ command: ['sh', '-c', execCmd], timeout: 10 }),
       })
       if (!res.ok) {
         term.current?.writeln(`\r\n\x1b[31mError: ${res.status}\x1b[0m`)
@@ -54,7 +67,7 @@ export default function TerminalView({ containerId, onClose }: TerminalViewProps
       term.current?.write('\r\n' + PROMPT)
       lineBuf.current = ''
     }
-  }, [containerId])
+  }, [containerId, onClose])
 
   useEffect(() => {
     const t = new XTerm({
@@ -73,20 +86,13 @@ export default function TerminalView({ containerId, onClose }: TerminalViewProps
     t.loadAddon(fit)
     fitAddon.current = fit
 
-    try {
-      const wg = new WebglAddon()
-      t.loadAddon(wg)
-      wg.onContextLoss(() => wg.dispose())
-    } catch { /* fallback */ }
+    try { const wg = new WebglAddon(); t.loadAddon(wg); wg.onContextLoss(() => wg.dispose()) } catch { /* fallback */ }
 
-    if (termRef.current) {
-      t.open(termRef.current)
-      fit.fit()
-    }
+    if (termRef.current) { t.open(termRef.current); fit.fit() }
 
     t.writeln('\x1b[36mConnected to \x1b[33m' + containerId.slice(0, 12) + '\x1b[0m')
-    t.writeln('Type commands, Enter to run. ↑ for history. Ctrl+C to cancel.')
-    t.write(PROMPT)
+    t.writeln('Type commands, Enter to run. \x1b[33mexit\x1b[0m to close. ↑ for history.')
+    t.write('\r\n' + PROMPT)
 
     term.current = t
 
@@ -125,29 +131,23 @@ export default function TerminalView({ containerId, onClose }: TerminalViewProps
       if (data === '\x1b[A') {
         if (history.current.length > 0 && historyIdx.current > 0) {
           historyIdx.current--
-          const curLen = lineBuf.current.length
-          t.write('\r'.repeat(curLen ? 1 : 0) + '\x1b[K')
+          const clearLen = lineBuf.current.length
+          t.write('\r\x1b[K' + PROMPT + history.current[historyIdx.current])
           lineBuf.current = history.current[historyIdx.current]
-          t.write(PROMPT.replace('\r\n', ''))
-          if (history.current[historyIdx.current]) {
-            t.write(history.current[historyIdx.current])
-          }
         }
         return
       }
 
       if (data === '\x1b[B') {
+        t.write('\r\x1b[K')
         if (historyIdx.current < history.current.length - 1) {
           historyIdx.current++
-          t.write('\r\x1b[K')
           lineBuf.current = history.current[historyIdx.current]
-          t.write(PROMPT.replace('\r\n', ''))
-          t.write(history.current[historyIdx.current])
+          t.write(PROMPT + history.current[historyIdx.current])
         } else {
           historyIdx.current = history.current.length
-          t.write('\r\x1b[K')
           lineBuf.current = ''
-          t.write(PROMPT.replace('\r\n', ''))
+          t.write(PROMPT)
         }
         return
       }
