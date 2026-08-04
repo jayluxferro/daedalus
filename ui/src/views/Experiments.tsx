@@ -1,17 +1,29 @@
 import { Fragment, useState } from 'react'
-import { useExperiments } from '../api/experiments'
+import { useExperiments, useDeleteExperiment, useClearExperiments } from '../api/experiments'
 import { Box, GlassBox } from './shared'
 
 export default function ExperimentsView() {
   const { data: experiments, isLoading } = useExperiments()
   const [expanded, setExpanded] = useState<string | null>(null)
+  const deleteExperiment = useDeleteExperiment()
+  const clearExperiments = useClearExperiments()
 
   return (
     <Box>
-      <h2 style={{ fontSize: 20, fontWeight: 600, marginBottom: 20 }}>Experiments</h2>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
+        <h2 style={{ fontSize: 20, fontWeight: 600, margin: 0 }}>Experiments</h2>
+        {experiments && experiments.length > 0 && (
+          <button onClick={() => { if (confirm('Delete all experiment records?')) clearExperiments.mutate() }}
+            style={{ background: '#ef444420', border: '1px solid #ef444440', color: '#ef4444', borderRadius: 6, padding: '6px 14px', cursor: 'pointer', fontSize: 12 }}>
+            Clear All ({experiments.length})
+          </button>
+        )}
+      </div>
       <p style={{ fontSize: 13, color: 'var(--muted-fg)', marginBottom: 16 }}>
-        Run manifests and artifacts from the DAEDALUS store.
+        Run manifests record every container created — image, profile, command, artifacts.
       </p>
+
+      {clearExperiments.isPending && <p style={{ color: 'var(--muted-fg)' }}>Clearing...</p>}
 
       {isLoading ? (
         <p style={{ color: 'var(--muted-fg)' }}>Loading...</p>
@@ -28,6 +40,7 @@ export default function ExperimentsView() {
                 <th style={th}>Created</th>
                 <th style={th}>Exit</th>
                 <th style={th}>Artifacts</th>
+                <th style={th}></th>
               </tr>
             </thead>
             <tbody>
@@ -41,10 +54,16 @@ export default function ExperimentsView() {
                     <td style={td}>{e.created_at ? new Date(e.created_at).toLocaleString() : '—'}</td>
                     <td style={td}>{e.exit_code ?? '—'}</td>
                     <td style={td}>{e.artifacts?.length ?? 0}</td>
+                    <td style={td}>
+                      <button onClick={ev => { ev.stopPropagation(); deleteExperiment.mutate(e.run_id) }}
+                        style={{ background: 'transparent', border: '1px solid var(--border)', color: '#ef4444', borderRadius: 4, padding: '2px 8px', cursor: 'pointer', fontSize: 11 }}>
+                        ✕
+                      </button>
+                    </td>
                   </tr>
                   {expanded === e.run_id && (
                     <tr>
-                      <td colSpan={6} style={{ padding: 12, background: '#0f0f13' }}>
+                      <td colSpan={7} style={{ padding: 12, background: '#0f0f13' }}>
                         <pre style={{ fontSize: 11, whiteSpace: 'pre-wrap' }}>
                           {JSON.stringify(e, null, 2)}
                         </pre>

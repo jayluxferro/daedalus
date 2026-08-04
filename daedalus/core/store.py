@@ -135,6 +135,27 @@ class Store:
         self._persist(manifest)
         return manifest
 
+    def delete(self, run_id: str) -> bool:
+        """Delete a run manifest. Returns True if deleted."""
+        path = self._manifest_path(run_id)
+        self._manifests.pop(run_id, None)
+        if os.path.exists(path):
+            os.remove(path)
+            return True
+        return False
+
+    def clear(self) -> int:
+        """Delete all run manifests. Returns count removed."""
+        count = 0
+        for entry in list(os.listdir(self._root)):
+            if entry.endswith(".manifest.json"):
+                run_id = entry[:-len(".manifest.json")]
+                path = os.path.join(self._root, entry)
+                os.remove(path)
+                self._manifests.pop(run_id, None)
+                count += 1
+        return count
+
     def add_artifact(self, run_id: str, artifact: Artifact) -> None:
         manifest = self.get(run_id)
         if manifest:

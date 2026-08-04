@@ -788,6 +788,22 @@ async def get_experiment(run_id: str) -> dict[str, Any]:
     return asdict(manifest)
 
 
+@app.delete("/experiments/{run_id}")
+async def delete_experiment(run_id: str) -> dict[str, Any]:
+    s = _get_state()
+    deleted = s["store"].delete(run_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="experiment not found")
+    return {"status": "deleted", "run_id": run_id}
+
+
+@app.delete("/experiments")
+async def clear_experiments() -> dict[str, Any]:
+    s = _get_state()
+    count = s["store"].clear()
+    return {"status": "cleared", "count": count}
+
+
 # ==========================================================================
 # System
 # ==========================================================================

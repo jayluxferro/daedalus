@@ -1,5 +1,5 @@
-import { useQuery } from '@tanstack/react-query'
-import { apiGet } from './client'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { apiGet, apiDelete } from './client'
 
 export interface ExperimentManifest {
   run_id: string
@@ -28,5 +28,22 @@ export function useExperiment(id: string | null) {
     queryKey: ['experiment', id],
     queryFn: () => apiGet<ExperimentManifest>(`/experiments/${id}`),
     enabled: !!id,
+  })
+}
+
+export function useDeleteExperiment() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (runId: string) =>
+      apiDelete<{ status: string }>(`/experiments/${runId}`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['experiments'] }),
+  })
+}
+
+export function useClearExperiments() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: () => apiDelete<{ status: string; count: number }>('/experiments'),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['experiments'] }),
   })
 }
