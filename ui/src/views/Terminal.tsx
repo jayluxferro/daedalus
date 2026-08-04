@@ -1,9 +1,8 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState, useCallback } from 'react'
 import { Terminal as XTerm } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebglAddon } from '@xterm/addon-webgl'
 import '@xterm/xterm/css/xterm.css'
-import { API_BASE } from '../api/client'
 import { Box, GlassBox } from './shared'
 
 interface TerminalViewProps {
@@ -11,9 +10,51 @@ interface TerminalViewProps {
   onClose?: () => void
 }
 
+const PROMPT = '\r\n\x1b[36mλ \x1b[0m'
+
 export default function TerminalView({ containerId, onClose }: TerminalViewProps) {
   const termRef = useRef<HTMLDivElement>(null)
-  const wsRef = useRef<WebSocket | null>(null)
+  const term = useRef<XTerm | null>(null)
+  const fitAddon = useRef<FitAddon | null>(null)
+  const [sending, setSending] = useState(false)
+  const lineBuf = useRef('')
+  const history = useRef<string[]>([])
+  const historyIdx = useRef(0)
+
+  const send = useCallback(async (cmd: string) => {
+    setSending(true)
+    try {
+      const res = await fetch(`/containers/${containerId}/exec`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command: ['sh', '-c', cmd] }),
+      })
+      if (!res.ok) {
+        term.current?.writeln(`\r\n\x1b[31mError: ${res.status}\x1b[0m`)
+        return
+      }
+      const data = await res.json()
+      if (data.stdout) {
+        for (const line of data.stdout.split('\n')) {
+          term.current?.writeln('\r' + line)
+        }
+      }
+      if (data.stderr) {
+        for (const line of data.stderr.split('\n')) {
+          if (line.trim()) term.current?.writeln('\r\x1b[31m' + line + '\x1b[0m')
+        }
+      }
+      if (data.exit_code !== 0 && data.exit_code !== undefined) {
+        term.current?.writeln(`\r\x1b[33m[exit ${data.exit_code}]\x1b[0m`)
+      }
+    } catch (err) {
+      term.current?.writeln(`\r\n\x1b[31m${err}\x1b[0m`)
+    } finally {
+      setSending(false)
+      term.current?.write('\r\n' + PROMPT)
+      lineBuf.current = ''
+    }
+  }, [containerId])
 
   useEffect(() => {
     const t = new XTerm({
@@ -30,44 +71,90 @@ export default function TerminalView({ containerId, onClose }: TerminalViewProps
 
     const fit = new FitAddon()
     t.loadAddon(fit)
+    fitAddon.current = fit
 
     try {
       const wg = new WebglAddon()
       t.loadAddon(wg)
       wg.onContextLoss(() => wg.dispose())
-    } catch { /* fallback to canvas */ }
+    } catch { /* fallback */ }
 
     if (termRef.current) {
       t.open(termRef.current)
       fit.fit()
     }
 
-    const wsUrl = API_BASE.replace(/^http/, 'ws') + `/containers/${containerId}/exec`
-    const ws = new WebSocket(wsUrl)
-    ws.binaryType = 'arraybuffer'
-    wsRef.current = ws
+    t.writeln('\x1b[36mConnected to \x1b[33m' + containerId.slice(0, 12) + '\x1b[0m')
+    t.writeln('Type commands, Enter to run. ↑ for history. Ctrl+C to cancel.')
+    t.write(PROMPT)
 
-    ws.onopen = () => fit.fit()
-
-    ws.onmessage = (ev) => {
-      if (ev.data instanceof ArrayBuffer) {
-        t.write(new Uint8Array(ev.data))
-      } else {
-        t.write(String(ev.data))
-      }
-    }
-
-    ws.onclose = () => {
-      t.writeln('\r\n\x1b[33m[disconnected]\x1b[0m')
-    }
-
-    ws.onerror = () => {
-      t.writeln('\r\n\x1b[31m[connection error]\x1b[0m')
-    }
+    term.current = t
 
     t.onData((data) => {
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(data)
+      if (sending) return
+
+      if (data === '\r') {
+        t.write('\r\n')
+        const cmd = lineBuf.current.trim()
+        if (cmd) {
+          history.current.push(cmd)
+          historyIdx.current = history.current.length
+          send(cmd)
+        } else {
+          lineBuf.current = ''
+          t.write(PROMPT)
+        }
+        return
+      }
+
+      if (data === '\x03' || data === '\x04') {
+        t.write('^C\r\n' + PROMPT)
+        lineBuf.current = ''
+        historyIdx.current = history.current.length
+        return
+      }
+
+      if (data === '\x7f') {
+        if (lineBuf.current.length > 0) {
+          lineBuf.current = lineBuf.current.slice(0, -1)
+          t.write('\b \b')
+        }
+        return
+      }
+
+      if (data === '\x1b[A') {
+        if (history.current.length > 0 && historyIdx.current > 0) {
+          historyIdx.current--
+          const curLen = lineBuf.current.length
+          t.write('\r'.repeat(curLen ? 1 : 0) + '\x1b[K')
+          lineBuf.current = history.current[historyIdx.current]
+          t.write(PROMPT.replace('\r\n', ''))
+          if (history.current[historyIdx.current]) {
+            t.write(history.current[historyIdx.current])
+          }
+        }
+        return
+      }
+
+      if (data === '\x1b[B') {
+        if (historyIdx.current < history.current.length - 1) {
+          historyIdx.current++
+          t.write('\r\x1b[K')
+          lineBuf.current = history.current[historyIdx.current]
+          t.write(PROMPT.replace('\r\n', ''))
+          t.write(history.current[historyIdx.current])
+        } else {
+          historyIdx.current = history.current.length
+          t.write('\r\x1b[K')
+          lineBuf.current = ''
+          t.write(PROMPT.replace('\r\n', ''))
+        }
+        return
+      }
+
+      if (data.length === 1 && data.charCodeAt(0) >= 0x20) {
+        lineBuf.current += data
+        t.write(data)
       }
     })
 
@@ -76,10 +163,9 @@ export default function TerminalView({ containerId, onClose }: TerminalViewProps
 
     return () => {
       window.removeEventListener('resize', handleResize)
-      ws.close()
       t.dispose()
     }
-  }, [containerId])
+  }, [containerId, send])
 
   return (
     <Box>
