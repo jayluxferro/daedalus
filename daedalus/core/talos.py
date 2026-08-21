@@ -3,13 +3,12 @@
 Talos builds named topologies declaratively, controls DNS, and enforces
 traffic policy.
 
-.. note::
-    ``container network`` is not wired as a top-level subcommand in
-    container v0.1.0.  The plugin binary
-    (``container-network-vmnet``) exists but the CLI command tree does
-    not expose it yet.  Talos focuses on what *is* available today:
-    DNS control via ``--dns`` flags on ``container run``, and system DNS
-    management via ``container system dns``.
+Talos owns the full ``container network`` surface: network CRUD
+(create/list/inspect/delete) and topology materialization.  The
+``container network`` subcommand is a top-level command in container
+1.2.2 (default plugin ``container-network-vmnet``).  DNS control via
+``--dns`` flags on ``container run`` and system DNS management via
+``container system dns`` remain part of Talos's remit.
 """
 
 from __future__ import annotations
@@ -20,8 +19,10 @@ from typing import Any
 import yaml
 
 from daedalus.core.audit import ActorKind, AuditLog
-from daedalus.core.backend import Backend, NetworkSpec
+from daedalus.core.backend import Backend, NetworkInfo, NetworkSpec
 from daedalus.core.capabilities import CapabilityManifest
+from daedalus.core.exceptions import ValidationError
+from daedalus.core.policy import Decision, PolicyEngine
 
 # ==========================================================================
 # Topology model
@@ -81,6 +82,8 @@ class Talos:
         The active ``Backend`` implementation.
     capabilities:
         Host capability manifest.
+    policy:
+        Optional policy engine for pre-execution guardrails.
     audit:
         Optional audit log for operation recording.
     """
@@ -90,15 +93,17 @@ class Talos:
         backend: Backend,
         capabilities: CapabilityManifest,
         *,
+        policy: PolicyEngine | None = None,
         audit: AuditLog | None = None,
     ) -> None:
         self._backend = backend
         self._caps = capabilities
+        self._policy = policy or PolicyEngine()
         self._audit = audit or AuditLog()
         self._topologies: dict[str, Topology] = {}
 
     # ==================================================================
-    # DNS control (available in v0.1.0)
+    # DNS control
     # ==================================================================
 
     @staticmethod
@@ -124,7 +129,7 @@ class Talos:
         return args
 
     # ==================================================================
-    # System DNS (local resolvable domains) — available in v0.1.0
+    # System DNS (local resolvable domains)
     # ==================================================================
 
     async def system_dns_create(self, domain: str) -> None:
@@ -199,3 +204,89 @@ class Talos:
         if not isinstance(data, dict):
             raise ValueError("topology file must contain a mapping")
         return Talos.parse_topology(data)
+
+    # ==================================================================
+    # Network CRUD (container 1.2.2)
+    # ==================================================================
+
+    async def network_create(self, spec: NetworkSpec) -> NetworkInfo:
+        """Create a network.
+
+        Host-routable networks (``internal=False``) are policy-gated via
+        ``check_network_expose`` — creating one without an explicit
+        confirm is rejected.  Internal networks skip the check.
+        """
+        if not spec.internal:
+            r = self._policy.check_network_expose()
+            if r.decision == Decision.CONFIRM:
+                raise ValidationError("network create requires confirm=True")
+            self._policy.log("check_network_expose", "talos", r)
+            self._policy.enforce(r)
+        info = await self._backend.network_create(spec)
+        self._audit.record(
+            "network_create", actor="talos", actor_kind=ActorKind.SERVICE,
+            args={
+                "name": spec.name,
+                "subnet": spec.subnet,
+                "subnet_v6": spec.subnet_v6,
+                "internal": spec.internal,
+            },
+        )
+        return info
+
+    async def network_list(self) -> list[NetworkInfo]:
+        """List networks (read-only, no policy or audit)."""
+        return await self._backend.network_list()
+
+    async def network_inspect(self, name: str) -> NetworkInfo:
+        """Inspect a single network (read-only, no policy or audit)."""
+        return await self._backend.network_inspect(name)
+
+    async def network_delete(self, name: str, *, confirm: bool = False) -> None:
+        """Delete a network.
+
+        Requires explicit ``confirm=True`` (policy-gated).
+        """
+        r = self._policy.check_network_delete(confirm=confirm)
+        if r.decision == Decision.CONFIRM:
+            raise ValidationError("network delete requires confirm=True")
+        self._policy.log("check_network_delete", "talos", r)
+        self._policy.enforce(r)
+        await self._backend.network_delete(name)
+        self._audit.record(
+            "network_delete", actor="talos", actor_kind=ActorKind.SERVICE,
+            args={"name": name, "confirm": confirm},
+        )
+
+    # ==================================================================
+    # Topology materialization
+    # ==================================================================
+
+    async def apply_topology(self, template: TopologyTemplate) -> Topology:
+        """Materialise a topology template into live networks.
+
+        Each network in ``template.networks`` is created unless a network
+        with the same name already exists (data-driven dedupe); the
+        resulting ``network_ids`` maps every template network name to its
+        live network id (the existing id for skipped names).
+
+        Attachments are NOT applied here — the caller attaches containers
+        via ``Forge.run(..., network=...)`` (``RunSpec.network``).
+        """
+        existing = {n.name: n for n in await self.network_list()}
+        network_ids: dict[str, str] = {}
+        for spec in template.networks:
+            if spec.name in network_ids:
+                continue
+            if spec.name in existing:
+                network_ids[spec.name] = existing[spec.name].id
+            else:
+                info = await self.network_create(spec)
+                network_ids[spec.name] = info.id
+        topology = Topology(template=template, network_ids=network_ids)
+        self._topologies[template.name] = topology
+        self._audit.record(
+            "topology_apply", actor="talos", actor_kind=ActorKind.SERVICE,
+            args={"name": template.name, "networks": [n.name for n in template.networks]},
+        )
+        return topology

@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { useContainers, useRunContainer, useStartContainer, useStopContainer, useDestroyContainer, useKillContainer, useInspectContainer } from '../api/containers'
+import { useContainers, useRunContainer, useStartContainer, useStopContainer, useDestroyContainer, useKillContainer, useInspectContainer, useStats, useExportFs, usePruneContainers, useCpuPercentMap } from '../api/containers'
 import { useProfiles } from '../api/system'
 import { Box, GlassBox, Badge, StatCard, Modal } from './shared'
 
@@ -9,12 +9,25 @@ const label: React.CSSProperties = { fontSize: 12, color: 'var(--muted-fg)', dis
 const btnStyle: React.CSSProperties = { padding: '6px 14px', borderRadius: 6, border: '1px solid var(--border)', background: '#1c1c22', color: 'var(--fg)', cursor: 'pointer', fontSize: 12 }
 const dangerBtn: React.CSSProperties = { ...btnStyle, borderColor: '#ef444440', color: '#ef4444' }
 
+function formatBytes(b: number): string {
+  if (b > 1e12) return (b / 1e12).toFixed(1) + ' TB'
+  if (b > 1e9) return (b / 1e9).toFixed(1) + ' GB'
+  if (b > 1e6) return (b / 1e6).toFixed(1) + ' MB'
+  return b.toLocaleString() + ' B'
+}
+
 export default function ContainersView({ onOpenTerminal }: { onOpenTerminal?: (id: string) => void }) {
   const { data: containers, isLoading } = useContainers(true)
+  const { data: stats } = useStats()
+  const cpuMap = useCpuPercentMap(stats)
+  const statsById = new Map((stats || []).map(s => [s.id, s]))
+  const prune = usePruneContainers()
   const [filter, setFilter] = useState('all')
   const [search, setSearch] = useState('')
   const [showCreate, setShowCreate] = useState(false)
   const [inspectId, setInspectId] = useState<string | null>(null)
+  const [pruneNote, setPruneNote] = useState<string | null>(null)
+  const [pruneError, setPruneError] = useState<string | null>(null)
 
   const items = (containers || [])
     .filter(c => {
@@ -51,11 +64,29 @@ export default function ContainersView({ onOpenTerminal }: { onOpenTerminal?: (i
             }}>{s}</button>
           ))}
           <div style={{ flex: 1 }} />
+          <button
+            onClick={() => {
+              if (confirm('Prune stopped containers?')) {
+                prune.mutate(undefined, {
+                  onSuccess: r => {
+                    setPruneNote(`Pruned: ${r.message} (${r.ids.length} container${r.ids.length === 1 ? '' : 's'} removed)`)
+                    setPruneError(null)
+                  },
+                  onError: e => setPruneError((e as Error).message),
+                })
+              }
+            }}
+            disabled={prune.isPending}
+            style={{ ...btnStyle, color: '#ef4444', borderColor: '#ef444440' }}
+          >{prune.isPending ? 'Pruning...' : 'Prune stopped'}</button>
           <button onClick={() => setShowCreate(true)} style={{
             background: '#3b82f6', color: 'white', border: 'none', padding: '8px 16px', borderRadius: 6, cursor: 'pointer', fontSize: 13, fontWeight: 600,
           }}>+ New</button>
         </div>
       </GlassBox>
+
+      {pruneError && <p style={{ color: 'var(--danger)', fontSize: 12, margin: '4px 0 8px' }}>{pruneError}</p>}
+      {pruneNote && <p style={{ color: '#22c55e', fontSize: 12, margin: '4px 0 8px' }}>{pruneNote}</p>}
 
       {isLoading && <p style={{ color: 'var(--muted-fg)' }}>Loading...</p>}
 
@@ -69,15 +100,18 @@ export default function ContainersView({ onOpenTerminal }: { onOpenTerminal?: (i
               <th style={{ padding: 8, fontSize: 11, color: 'var(--muted-fg)', fontWeight: 500 }}>State</th>
               <th style={{ padding: 8, fontSize: 11, color: 'var(--muted-fg)', fontWeight: 500 }}>IP</th>
               <th style={{ padding: 8, fontSize: 11, color: 'var(--muted-fg)', fontWeight: 500 }}>Profile</th>
+              <th style={{ padding: 8, fontSize: 11, color: 'var(--muted-fg)', fontWeight: 500 }}>CPU</th>
+              <th style={{ padding: 8, fontSize: 11, color: 'var(--muted-fg)', fontWeight: 500 }}>Memory</th>
               <th style={{ padding: 8, fontSize: 11, color: 'var(--muted-fg)', fontWeight: 500 }}>Actions</th>
             </tr>
           </thead>
           <tbody>
             {items.length === 0 && (
-              <tr><td colSpan={7} style={{ padding: 24, textAlign: 'center', color: 'var(--muted-fg)' }}>No containers. Create one with + New</td></tr>
+              <tr><td colSpan={9} style={{ padding: 24, textAlign: 'center', color: 'var(--muted-fg)' }}>No containers. Create one with + New</td></tr>
             )}
             {items.map(c => (
-              <ContainerRow key={c.id} container={c} onInspect={setInspectId} onOpenTerminal={onOpenTerminal} />
+              <ContainerRow key={c.id} container={c} onInspect={setInspectId} onOpenTerminal={onOpenTerminal}
+                cpuPct={cpuMap[c.id]} memUsage={statsById.get(c.id)?.memory_usage_bytes} memLimit={statsById.get(c.id)?.memory_limit_bytes} />
             ))}
           </tbody>
         </table>
@@ -94,15 +128,20 @@ export default function ContainersView({ onOpenTerminal }: { onOpenTerminal?: (i
   )
 }
 
-function ContainerRow({ container: c, onInspect, onOpenTerminal }: {
+function ContainerRow({ container: c, onInspect, onOpenTerminal, cpuPct, memUsage, memLimit }: {
   container: { id: string; name: string; image: string; state: string; profile: string; ip?: string | null }
   onInspect: (id: string) => void
   onOpenTerminal?: (id: string) => void
+  cpuPct?: number
+  memUsage?: number
+  memLimit?: number
 }) {
   const start = useStartContainer()
   const stop = useStopContainer()
   const destroy = useDestroyContainer()
   const kill = useKillContainer()
+  const exportM = useExportFs()
+  const [exportedPath, setExportedPath] = useState<string | null>(null)
   const running = c.state === 'running'
 
   const copyIp = () => {
@@ -125,13 +164,24 @@ function ContainerRow({ container: c, onInspect, onOpenTerminal }: {
         ) : '—'}
       </td>
       <td style={{ padding: 8, fontSize: 12 }}>{c.profile}</td>
-      <td style={{ padding: 8, display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-        <button onClick={() => onInspect(c.id)} style={btnStyle}>Inspect</button>
-        {onOpenTerminal && running && <button onClick={() => onOpenTerminal(c.id)} style={btnStyle}>Term</button>}
-        {!running && <button onClick={() => start.mutate(c.id)} style={{...btnStyle, color:'#22c55e'}} disabled={start.isPending}>Start</button>}
-        {running && <button onClick={() => stop.mutate(c.id)} style={btnStyle} disabled={stop.isPending}>Stop</button>}
-        {running && <button onClick={() => kill.mutate({ id: c.id })} style={{...btnStyle, color:'#ef4444'}} disabled={kill.isPending}>Kill</button>}
-        <button onClick={() => { if (confirm('Destroy container?')) destroy.mutate(c.id) }} style={dangerBtn} disabled={destroy.isPending}>✕</button>
+      <td style={{ padding: 8, fontSize: 12, fontVariantNumeric: 'tabular-nums' }}>
+        {cpuPct !== undefined ? cpuPct.toFixed(1) + '%' : '—'}
+      </td>
+      <td style={{ padding: 8, fontSize: 11, color: 'var(--muted-fg)', fontVariantNumeric: 'tabular-nums' }}>
+        {memUsage !== undefined ? formatBytes(memUsage) + (memLimit ? ' / ' + formatBytes(memLimit) : '') : '—'}
+      </td>
+      <td style={{ padding: 8 }}>
+        <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+          <button onClick={() => onInspect(c.id)} style={btnStyle}>Inspect</button>
+          {onOpenTerminal && running && <button onClick={() => onOpenTerminal(c.id)} style={btnStyle}>Term</button>}
+          {!running && <button onClick={() => start.mutate(c.id)} style={{...btnStyle, color:'#22c55e'}} disabled={start.isPending}>Start</button>}
+          {running && <button onClick={() => stop.mutate(c.id)} style={btnStyle} disabled={stop.isPending}>Stop</button>}
+          {running && <button onClick={() => kill.mutate({ id: c.id })} style={{...btnStyle, color:'#ef4444'}} disabled={kill.isPending}>Kill</button>}
+          <button onClick={() => exportM.mutate(c.id, { onSuccess: r => setExportedPath(r.path) })} style={btnStyle} disabled={exportM.isPending}>Export</button>
+          <button onClick={() => { if (confirm('Destroy container?')) destroy.mutate(c.id) }} style={dangerBtn} disabled={destroy.isPending}>✕</button>
+        </div>
+        {exportM.isError && <div style={{ fontSize: 10, color: '#ef4444', marginTop: 4 }}>{(exportM.error as Error).message}</div>}
+        {exportedPath && <div style={{ fontSize: 10, color: '#22c55e', marginTop: 4, wordBreak: 'break-all' }}>exported → {exportedPath}</div>}
       </td>
     </tr>
   )

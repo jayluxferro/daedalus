@@ -1,5 +1,5 @@
 import { useSystemStatus, useBuilderStatus, useSystemRestart } from '../api/system'
-import { useContainers } from '../api/containers'
+import { useContainers, useStats, useCpuPercentMap } from '../api/containers'
 import { useImages, usePruneImages } from '../api/images'
 import { Box, GlassBox, StatCard, Badge } from './shared'
 
@@ -8,11 +8,16 @@ export default function Dashboard() {
   const { data: builder } = useBuilderStatus()
   const { data: containers, isLoading: loadingContainers } = useContainers(true)
   const { data: images, isLoading: loadingImages } = useImages()
+  const { data: stats } = useStats()
+  const cpuMap = useCpuPercentMap(stats)
   const prune = usePruneImages()
   const restart = useSystemRestart()
 
   const running = containers?.filter(c => c.state === 'running').length ?? 0
   const stopped = (containers?.length ?? 0) - running
+
+  const memUsed = (stats || []).reduce((acc, s) => acc + s.memory_usage_bytes, 0)
+  const cpuPct = Object.values(cpuMap).reduce((acc, v) => acc + v, 0)
 
   const disk = status?.disk_usage
   const diskError = disk && 'error' in disk ? String(disk.error) : null
@@ -32,6 +37,9 @@ export default function Dashboard() {
         <StatCard label="Running" value={loadingContainers ? '...' : String(running)} color="var(--success)" />
         <StatCard label="Stopped" value={loadingContainers ? '...' : String(stopped)} color="var(--muted-fg)" />
         <StatCard label="Images" value={loadingImages ? '...' : String(images?.length ?? 0)} />
+        <StatCard label="Container Memory" value={stats ? formatBytes(memUsed) : '...'} color="#3b82f6" />
+        <StatCard label="Container CPU" value={stats ? cpuPct.toFixed(0) + '%' : '...'} color="#3b82f6" />
+        <StatCard label="Sampled Containers" value={stats ? String(stats.length) : '...'} color="var(--muted-fg)" />
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 16 }}>

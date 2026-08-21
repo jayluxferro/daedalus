@@ -10,15 +10,16 @@ applied *before* any backend call.
 
 from __future__ import annotations
 
+import builtins
+import contextlib
 import json
 import os
-import contextlib
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
 from daedalus.core.audit import ActorKind, AuditLog
-from daedalus.core.backend import Backend, ContainerInfo, RunSpec
+from daedalus.core.backend import Backend, ContainerInfo, RunSpec, StatsSample
 from daedalus.core.capabilities import CapabilityManifest
 from daedalus.core.exceptions import ValidationError
 from daedalus.core.minos import Minos
@@ -202,7 +203,7 @@ class Forge:
             lab.id, image=image, image_digest="", profile=profile,
             command=command or [], container_name=lab.name,
         )
-        # Inject CA cert if specified (container v0.1.0 only supports
+        # Inject CA cert if specified (the container runtime only supports
         # directory volume mounts, so we exec the cert content in)
         cert_path = kwargs.get("cert_path")
         if cert_path:
@@ -365,6 +366,20 @@ class Forge:
     # System
     # ==================================================================
 
+    async def stats(self, container_id: str | None = None) -> builtins.list[StatsSample]:
+        """One-shot resource statistics for a container (or all running).
+
+        Read-only and high-frequency, so this is a pure passthrough to
+        the backend: no policy checks are applied and no audit entry is
+        recorded (spec §4.4).  ``container_id`` may be omitted to sample
+        all running containers.
+
+        (``builtins.list``: the bare ``list`` annotation inside this class
+        body resolves to ``Forge.list`` — see backend.py for the same
+        convention.)
+        """
+        return await self._backend.stats(container_id)
+
     async def system_status(self) -> SystemStatus:
         disk = await self._backend.system_df()
         try:
@@ -444,6 +459,7 @@ _RUNSPEC_FIELDS = {
     "cidfile", "os", "arch", "dns", "dns_domain", "dns_search", "dns_option", "no_dns",
     "scheme", "disable_progress_updates", "command",
     "proxy", "cert_path", "no_proxy",
+    "network", "publish", "cap_add", "cap_drop",
 }
 
 

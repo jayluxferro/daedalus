@@ -38,12 +38,11 @@ class ContainerState(str, Enum):
 class RunSpec:
     """The full set of flags for ``container create`` / ``container run``.
 
-    This matches the flags confirmed present in container v0.1.0 via
-    ``container run --help`` / ``container create --help``.  Flags that
-    don't exist yet (rosetta, virtualization, shm-size, ulimit, publish,
-    publish-socket, network, cap-add/cap-drop, init-image)
-    are intentionally absent — they will be added when the CLI supports
-    them.
+    This matches the flags confirmed present in container 1.2.2 via
+    ``container run --help`` / ``container create --help``.  Flags not
+    yet covered by this dataclass (rosetta, shm-size, ulimit,
+    publish-socket, virtualization, init-image) are intentionally absent
+    — they will be added when the CLI supports them.
     """
 
     image: str
@@ -94,6 +93,12 @@ class RunSpec:
     # Registry
     scheme: str | None = None       # --scheme  (http, https, auto)
     disable_progress_updates: bool = False  # --disable-progress-updates
+
+    # Network / capabilities (container 1.2.2)
+    network: str | None = None        # --network <name>  (attach to a network)
+    publish: list[str] = field(default_factory=list)   # -p <spec>, repeatable
+    cap_add: list[str] = field(default_factory=list)   # --cap-add <cap>, repeatable
+    cap_drop: list[str] = field(default_factory=list)  # --cap-drop <cap>, repeatable
 
     # Analysis / instrumentation
     proxy: str | None = None          # HTTP_PROXY/HTTPS_PROXY host:port
@@ -212,10 +217,20 @@ class RunSpec:
             flags += ["--env", f"no_proxy={self.no_proxy}"]
 
         # --- cert injection (via forge after container start) ---
-        # container v0.1.0 volume mounts only support directories, not
+        # container volume mounts only support directories, not
         # individual files.  Cert injection happens at the Forge level
         # after the container is running: the cert file content is piped
         # via exec into /usr/local/share/ca-certificates/.
+
+        # --- network / capabilities (container 1.2.2) ---
+        if self.network:
+            flags += ["--network", self.network]
+        for p in self.publish:
+            flags += ["-p", p]
+        for cap in self.cap_add:
+            flags += ["--cap-add", cap]
+        for cap in self.cap_drop:
+            flags += ["--cap-drop", cap]
 
         # Image comes after all flags
         tail.append(self.image)
@@ -253,10 +268,8 @@ class NetworkSpec:
     """Spec for ``container network create``.
 
     .. note::
-        ``container network`` is not wired as a top-level subcommand in
-        v0.1.0.  The plugin binary exists but the command tree does not
-        expose it yet.  This dataclass is retained for forward
-        compatibility.
+        The ``container network`` subcommand tree is present in container
+        1.2.2; ``to_cli_args()`` matches its verified ``create`` flags.
     """
 
     name: str
@@ -265,6 +278,7 @@ class NetworkSpec:
     internal: bool = False          # host-only, no host route
     plugin: str = "container-network-vmnet"
     options: dict[str, str] = field(default_factory=dict)
+    labels: dict[str, str] = field(default_factory=dict)  # --label k=v
 
     def to_cli_args(self) -> list[str]:
         args = [self.name]
@@ -276,6 +290,8 @@ class NetworkSpec:
             args.append("--internal")
         if self.plugin:
             args += ["--plugin", self.plugin]
+        for k, v in self.labels.items():
+            args += ["--label", f"{k}={v}"]
         for k, v in self.options.items():
             args += ["--option", f"{k}={v}"]
         return args
@@ -335,6 +351,79 @@ class BuildSpec:
         return args
 
 
+@dataclass
+class StatsSample:
+    """One-shot resource statistics for a container (``container stats``).
+
+    ``cpu_usage_usec`` is **cumulative** CPU time — rates require two
+    samples and are derived via :meth:`cpu_percent`.  ``sampled_at`` is
+    a :func:`time.monotonic` timestamp captured when the output was
+    parsed.
+    """
+
+    id: str
+    cpu_usage_usec: int = 0        # cumulative
+    memory_usage_bytes: int = 0
+    memory_limit_bytes: int = 0
+    network_rx_bytes: int = 0
+    network_tx_bytes: int = 0
+    block_read_bytes: int = 0
+    block_write_bytes: int = 0
+    num_processes: int = 0
+    sampled_at: float = 0.0        # time.monotonic()
+
+    def cpu_percent(self, prev: StatsSample) -> float:
+        """CPU utilisation of this sample relative to ``prev``, 0..100.
+
+        percent = delta_cpu_usec / delta_time_sec * 100.  Returns 0.0
+        when the time delta is zero or negative (guards division by
+        zero) or when CPU time did not advance.
+        """
+        delta_usec = self.cpu_usage_usec - prev.cpu_usage_usec
+        delta_time = self.sampled_at - prev.sampled_at
+        if delta_time <= 0 or delta_usec <= 0:
+            return 0.0
+        percent = (delta_usec / delta_time) * 100.0
+        return max(0.0, min(100.0, percent))
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialise the sample as a flat dict."""
+        return {
+            "id": self.id,
+            "cpu_usage_usec": self.cpu_usage_usec,
+            "memory_usage_bytes": self.memory_usage_bytes,
+            "memory_limit_bytes": self.memory_limit_bytes,
+            "network_rx_bytes": self.network_rx_bytes,
+            "network_tx_bytes": self.network_tx_bytes,
+            "block_read_bytes": self.block_read_bytes,
+            "block_write_bytes": self.block_write_bytes,
+            "num_processes": self.num_processes,
+            "sampled_at": self.sampled_at,
+        }
+
+
+@dataclass
+class NetworkInfo:
+    """Parsed ``container network list`` / ``network inspect`` result."""
+
+    id: str
+    name: str
+    plugin: str = ""                 # e.g. "container-network-vmnet"
+    mode: str = ""                   # "nat" | "internal" | ...
+    subnet: str = ""                 # from status.ipv4Subnet
+    subnet_v6: str = ""              # from status.ipv6Subnet
+    gateway: str = ""                # from status.ipv4Gateway
+    raw: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class PruneResult:
+    """Result of ``container prune``."""
+
+    ids: list[str] = field(default_factory=list)
+    message: str = ""                # "Reclaimed 282.1 MB in disk space"
+
+
 # ==========================================================================
 # Abstract backend
 # ==========================================================================
@@ -343,13 +432,12 @@ class BuildSpec:
 class Backend(ABC):
     """Abstract interface to the container runtime.
 
-    Methods for commands that exist in container v0.1.0 are concrete
-    abstract methods.  Methods for future features raise
-    ``CapabilityError("NOT_IMPLEMENTED_IN_V010")`` by default so that
-    L2/L3 backends can override them when container supports them.
+    Every verb is an abstract method; each backend implements the verbs
+    it supports.  ``CliBackend`` (L1) covers the container CLI 1.2.2
+    surface; L2/L3 backends override the subset they provide.
     """
 
-    # -- lifecycle (all present in v0.1.0) ---------------------------------
+    # -- lifecycle -----------------------------------------------------------
 
     @abstractmethod
     async def create(self, spec: RunSpec) -> ContainerInfo:
@@ -395,7 +483,7 @@ class Backend(ABC):
 
     @abstractmethod
     async def list(self, all: bool = False) -> builtins.list[ContainerInfo]:
-        """List containers.  Supports ``--format json`` in v0.1.0."""
+        """List containers.  Supports ``--format json``."""
         ...
 
     @abstractmethod
@@ -437,7 +525,7 @@ class Backend(ABC):
         """Execute a command inside a running container."""
         ...
 
-    # -- images (all present in v0.1.0) ------------------------------------
+    # -- images --------------------------------------------------------------
 
     @abstractmethod
     async def image_pull(
@@ -486,7 +574,7 @@ class Backend(ABC):
 
     @abstractmethod
     async def image_list(self, quiet: bool = False) -> builtins.list[dict[str, Any]]:
-        """List images.  Supports ``--format json`` in v0.1.0."""
+        """List images.  Supports ``--format json``."""
         ...
 
     @abstractmethod
@@ -539,7 +627,7 @@ class Backend(ABC):
 
     @abstractmethod
     async def builder_status(self) -> dict[str, Any]:
-        """Print builder status.  Supports ``--json`` in v0.1.0."""
+        """Print builder status.  Supports ``--json``."""
         ...
 
     @abstractmethod
@@ -557,7 +645,7 @@ class Backend(ABC):
         """Delete the image builder."""
         ...
 
-    # -- system (subset present in v0.1.0) ---------------------------------
+    # -- system --------------------------------------------------------------
 
     @abstractmethod
     async def system_start(self) -> None:
@@ -618,10 +706,53 @@ class Backend(ABC):
     async def system_df(self) -> dict[str, Any]:
         """Disk usage info.
 
-        NOTE: ``container system df`` does not exist yet in v0.1.0.
-        Default implementation falls back to OS-level disk check.
+        NOTE: ``container system df`` is available in container 1.2.2;
+        the default implementation here still measures disk at the OS
+        level (the CliBackend's host-side check feeds policy budgets).
         """
         return {}
+
+    # -- stats / copy / export / prune / network (container 1.2.2) ----------
+
+    @abstractmethod
+    async def stats(self, container_id: str | None = None) -> list[StatsSample]:
+        """One-shot resource statistics for a container (or all running)."""
+        ...
+
+    @abstractmethod
+    async def copy(self, source: str, destination: str) -> str:
+        """Copy files to/from a container.  Raw passthrough; returns stdout."""
+        ...
+
+    @abstractmethod
+    async def export(self, container_id: str, output_path: str) -> str:
+        """Export a container's filesystem to a tar archive.  Returns ``output_path``."""
+        ...
+
+    @abstractmethod
+    async def prune(self) -> PruneResult:
+        """Remove stopped containers and reclaim disk space."""
+        ...
+
+    @abstractmethod
+    async def network_create(self, spec: NetworkSpec) -> NetworkInfo:
+        """Create a network and return its full info."""
+        ...
+
+    @abstractmethod
+    async def network_list(self) -> list[NetworkInfo]:
+        """List networks."""
+        ...
+
+    @abstractmethod
+    async def network_inspect(self, name: str) -> NetworkInfo:
+        """Inspect a single network."""
+        ...
+
+    @abstractmethod
+    async def network_delete(self, name: str) -> None:
+        """Delete a network."""
+        ...
 
     # -- escape hatch ------------------------------------------------------
 

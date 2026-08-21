@@ -4,22 +4,21 @@ icarus handles everything that crosses the host—guest boundary:
 
 * ``exec`` — run commands inside a container (no sshd needed)
 * ``logs`` — container log retrieval (live + boot)
-
-.. note::
-    ``cp``, ``export``, and ``stats`` do not exist as container subcommands
-    in v0.1.0.  They will be added when the CLI supports them.
+* ``copy_from`` / ``copy_to`` — file transfer across the boundary
+* ``export_fs`` — full filesystem export (tar), indexed as a store artifact
 """
 
 from __future__ import annotations
 
 import asyncio
+import os
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Any
 
 from daedalus.core.audit import ActorKind, AuditLog
 from daedalus.core.backend import Backend, ExecResult
-
+from daedalus.core.store import Artifact, Store
 
 
 @dataclass
@@ -46,6 +45,8 @@ class Icarus:
         The active ``Backend`` implementation.
     audit:
         Optional audit log for operation recording.
+    store:
+        Optional run store for artifact indexing.
     """
 
     def __init__(
@@ -53,10 +54,12 @@ class Icarus:
         backend: Backend,
         *,
         audit: AuditLog | None = None,
+        store: Store | None = None,
         runtime_binary: str = "container",
     ) -> None:
         self._backend = backend
         self._audit = audit or AuditLog()
+        self._store = store or Store()
         self._runtime_binary = runtime_binary
 
     async def exec(
@@ -110,6 +113,87 @@ class Icarus:
     ) -> ExecResult:
         """Execute a shell command (wraps in ``sh -c …``)."""
         return await self.exec(container_id, ["sh", "-c", command], options=options)
+
+    async def copy_from(
+        self,
+        container_id: str,
+        container_path: str,
+        host_path: str,
+    ) -> str:
+        """Copy a file or directory out of a container to the host.
+
+        The ``<container-id>:<path>`` prefix is built here — the id comes
+        from code, never from user string-munging.
+
+        Returns the backend's stdout (the destination path on success).
+        """
+        result = await self._backend.copy(
+            source=f"{container_id}:{container_path}",
+            destination=host_path,
+        )
+        self._audit.record(
+            "copy_from", actor="icarus", actor_kind=ActorKind.SERVICE,
+            args={
+                "container_id": container_id,
+                "container_path": container_path,
+                "host_path": host_path,
+            },
+        )
+        return result
+
+    async def copy_to(
+        self,
+        container_id: str,
+        host_path: str,
+        container_path: str,
+    ) -> str:
+        """Copy a file or directory from the host into a container."""
+        result = await self._backend.copy(
+            source=host_path,
+            destination=f"{container_id}:{container_path}",
+        )
+        self._audit.record(
+            "copy_to", actor="icarus", actor_kind=ActorKind.SERVICE,
+            args={
+                "container_id": container_id,
+                "host_path": host_path,
+                "container_path": container_path,
+            },
+        )
+        return result
+
+    async def export_fs(
+        self,
+        container_id: str,
+        output_path: str | None = None,
+    ) -> dict[str, Any]:
+        """Export a container's full filesystem to a tar archive.
+
+        Defaults to ``<store.root>/<container_id>.fs.tar``.  The resulting
+        archive is registered as a store artifact (``kind="fs"``).
+
+        Returns a dict with ``path``, ``container_id``, and the registered
+        ``artifact``.
+        """
+        if output_path is None:
+            output_path = os.path.join(self._store.root, f"{container_id}.fs.tar")
+        await self._backend.export(container_id, output_path)
+        artifact = Artifact(
+            name="filesystem.tar",
+            path=output_path,
+            kind="fs",
+            description="Full filesystem export (tar)",
+        )
+        self._store.add_artifact(container_id, artifact)
+        self._audit.record(
+            "export", actor="icarus", actor_kind=ActorKind.SERVICE,
+            args={"container_id": container_id, "output_path": output_path},
+        )
+        return {
+            "path": output_path,
+            "container_id": container_id,
+            "artifact": asdict(artifact),
+        }
 
     async def logs(
         self,

@@ -1,9 +1,9 @@
 """Named security postures — reusable container configuration profiles.
 
 Profiles are named security postures that configure every aspect of a
-Labyrinth run that container v0.1.0 supports.  Aspirational fields
-(capabilities, read-only rootfs, init-image, rosetta, networking) are
-reserved for when the CLI supports them.
+Labyrinth run that the current container runtime supports.  Aspirational
+fields (capabilities, read-only rootfs, init-image, rosetta) are reserved
+for when the CLI supports them.
 """
 
 from __future__ import annotations

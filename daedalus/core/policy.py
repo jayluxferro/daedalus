@@ -109,13 +109,15 @@ class PolicyEngine:
 
     def check_egress(self, network_spec: str) -> PolicyResult:
         """Check whether this network config allows egress."""
-        if self.config.egress_default == Decision.DENY:
-            # "host" or "bridge" networks allow egress
-            if network_spec in ("host", "bridge"):
-                return PolicyResult(
-                    Decision.CONFIRM,
-                    f"Network '{network_spec}' allows host egress — requires confirm",
-                )
+        # "host" or "bridge" networks allow egress
+        if (
+            self.config.egress_default == Decision.DENY
+            and network_spec in ("host", "bridge")
+        ):
+            return PolicyResult(
+                Decision.CONFIRM,
+                f"Network '{network_spec}' allows host egress — requires confirm",
+            )
         return PolicyResult(Decision.ALLOW)
 
     def check_image(self, image: str) -> PolicyResult:
@@ -143,6 +145,15 @@ class PolicyEngine:
             return PolicyResult(
                 Decision.CONFIRM,
                 "Destroy requires confirm=True",
+            )
+        return PolicyResult(Decision.ALLOW)
+
+    def check_network_delete(self, *, confirm: bool = False) -> PolicyResult:
+        """Destroying a network is CONFIRM-gated unless confirm=True. Mirror check_destroy."""
+        if self.config.require_confirm_destroy and not confirm:
+            return PolicyResult(
+                Decision.CONFIRM,
+                "Network delete requires confirm=True",
             )
         return PolicyResult(Decision.ALLOW)
 

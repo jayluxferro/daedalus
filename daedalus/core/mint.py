@@ -1,6 +1,6 @@
 """M3 — mint: image build/registry plane.
 
-Mint owns the full image lifecycle for what container v0.1.0 supports:
+Mint owns the full image lifecycle for what container 1.2.2 supports:
 
 * Build (Containerfile/Dockerfile, multi-arch, build-args, labels)
 * Pull / push / save / load / tag / delete / inspect / list / prune
@@ -81,7 +81,7 @@ class Mint:
         """Pull an image from a registry."""
         await self._backend.image_pull(image, platform=platform, scheme=scheme)
         info = await self._backend.image_inspect(image)
-        # container v0.1.0 OCI index format: {"name": "...", "index": {"digest": "...", "size": ...}}
+        # container OCI index format: {"name": "...", "index": {"digest": "...", "size": ...}}
         img_name = info.get("name", image)
         img_id = info.get("name", "")
         digest = ""
@@ -169,7 +169,7 @@ class Mint:
 
     async def inspect(self, image: str) -> ImageInfo:
         data = await self._backend.image_inspect(image)
-        # container v0.1.0 OCI index format: {"name": "...", "index": {"digest": "...", "size": ...}}
+        # container OCI index format: {"name": "...", "index": {"digest": "...", "size": ...}}
         img_name = data.get("name", image)
         img_index = data.get("index", {}) if isinstance(data.get("index"), dict) else {}
         return ImageInfo(
@@ -184,7 +184,7 @@ class Mint:
         raw_list = await self._backend.image_list(quiet=quiet)
         result = []
         for raw in raw_list:
-            # container v0.1.0 format: {"reference": "docker.io/library/alpine:latest",
+            # container OCI format: {"reference": "docker.io/library/alpine:latest",
             #  "descriptor": {"digest": "sha256:...", "mediaType": "...", "size": ...}}
             reference = raw.get("reference", "")
             descriptor = raw.get("descriptor", {}) if isinstance(raw.get("descriptor"), dict) else {}

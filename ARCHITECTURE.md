@@ -384,47 +384,52 @@ Containerization/XPC. Behind capability flags. *Test:* same `Backend` contract t
 
 ---
 
-## 9. Implementation status vs container v0.1.0
+## 9. Implementation status vs container 1.2.2
 
-The DAEDALUS control plane is fully implemented (Python, 23 modules, 119 tests, mypy strict,
-MCP + API + CLI surfaces).  Container v0.1.0 (commit `0fd8692`) is an early release — some
-features in the architecture above are **implemented and working**, others are **designed but
-gated on future container support**.
+The DAEDALUS control plane is fully implemented (Python, 23 modules, 193 tests, mypy strict,
+MCP + API + CLI surfaces).  The host runs container CLI **1.2.2** (commit `0190097`) — the
+same release Orchard pins.  Everything in this section is **implemented and working** against
+that release; anything still gated lives in the "container 1.2.2 reality" note below.
 
-### Working today (v0.1.0)
+### Working today (container 1.2.2)
 
 | Subsystem | Capability | Surface |
 |---|---|---|
 | forge | create, run, start, stop, kill, delete, list, inspect, logs | CLI, API, MCP |
+| forge | stats — one-shot CPU/mem/net/block/proc samples (`stats --no-stream --format json`), sampled in `StatsSample.sampled_at` for later rate derivation | CLI, API, MCP |
+| forge (RunSpec) | `--network <name>`, `-p/--publish` (repeatable), `--cap-add`, `--cap-drop` serialised by `RunSpec.to_cli_args()` | CLI, API, MCP |
 | icarus | exec (no `--` separator), logs (boot + stdio) | CLI, API, MCP |
+| icarus | copy — `copy_from`/`copy_to` (bidirectional, `id:` prefix built in code), byte-identical round-trip | CLI, API, MCP |
+| icarus | export — full-FS tar via `export_fs` (works on **running** containers in 1.2.2), indexed as a store artifact (`kind="fs"`) | CLI, API, MCP |
 | mint | pull, push, save, load, tag, delete, inspect, list, prune, build | CLI, API, MCP |
-| talos | DNS control (`--dns`, `--dns-domain`, `--dns-search`, `--no-dns`), system DNS (create/delete/list) | MCP |
+| talos | network CRUD — create/list/inspect/delete (default plugin `container-network-vmnet`), topology materialization via `apply_topology` | CLI, API, MCP |
+| talos | DNS control (`--dns`, `--dns-domain`, `--dns-search`, `--no-dns`), system DNS (create/delete/list) | CLI, API, MCP |
+| forge | prune — stop + reclaim disk via `container prune` | CLI, API, MCP |
 | profiles | detonation, bench, fuzz, isolated, deception | CLI, API, MCP |
-| policy | concurrency, disk, image allow/block-list, confirm gates (destroy, network, kernel) | Engine |
+| policy | concurrency, disk, image allow/block-list, confirm gates (destroy, network delete, network expose, kernel) | Engine |
 | audit | append-only, checksummed JSONL audit log | Engine |
-| store | run manifests with artifact index | Engine |
-| capabilities | host probe (binary, version, feature gates, flag inventory) | CLI, MCP |
+| store | run manifests with artifact index (fs tars, reports) | Engine |
+| capabilities | host probe (binary, version, feature gates incl. stats/copy/export/prune/network, flag inventory) | CLI, MCP |
 
-### Not yet in container v0.1.0 (code gated, ready when CLI supports them)
+### container 1.2.2 reality (what still isn't wrapped)
 
-- `container network create/list/delete` — plugin binary exists, CLI subcommand not wired
-- `container prune` — not found
-- `container stats` — not found
-- `container cp` — not found
-- `container export` — not found
-- `container system status` / `system version` — not found
-- `--rosetta`, `--virtualization`, `--init-image`, `--cap-add`/`--cap-drop` — not in help output
-- per-container kernel (`-k`) — flag exists; `system kernel set` works
+The 1.2.2 `network` subcommand is fully wired and wrapped (create/list/inspect/delete, default
+plugin `container-network-vmnet`); `stats`, `cp`/`copy`, `export`, and `prune` are present and
+wrapped by daedalus.  The CLI also ships `machine`, `volume`, and a `k8s` plugin — these exist
+but are **not yet wrapped** by daedalus (phases 2–3).  Run/create flags beyond the RunSpec
+extension (`--rosetta`, `--virtualization`, `--init-image`, `--publish-socket`, `--shm-size`,
+`--ulimit`) are present in 1.2.2 but not yet serialised; per-container kernels (`-k` +
+`system kernel set`) work.
 
 ### Quality gates (all passing)
 
 ```
 mypy --strict daedalus/     → Success: no issues found in 23 source files
-pytest tests/               → 119 passed (108 unit + 11 integration)
+pytest tests/               → 193 passed (177 unit + 16 integration)
 Import-time I/O             → zero subprocess calls
-MCP (stdio)                 → 11 tools, handshake verified
+MCP (stdio)                 → 51 tools, handshake verified
 MCP (cartograph federation) → discover + call verified
-API (FastAPI)               → /health, /containers, /images, /profiles, /system/status
+API (FastAPI)               → /health, /stats, /networks, /containers, /images, /profiles, /system/status
 ```
 
 ---

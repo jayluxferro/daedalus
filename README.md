@@ -17,9 +17,9 @@ A security-research control plane built on Apple's `container` runtime. DAEDALUS
 ├─────────────────────────────────────────────────────┤
 │                   CORE ENGINE                        │
 │  forge      → lifecycle + system                    │
-│  icarus     → exec, logs                            │
+│  icarus     → exec, logs, copy, export              │
 │  mint       → images (pull, list, tag, delete)      │
-│  talos      → DNS, network topology                 │
+│  talos      → networks, DNS, topology               │
 │  ariadne    → instrumentation, kernel variants      │
 │  minos      → forensic analysis, risk scoring       │
 ├─────────────────────────────────────────────────────┤
@@ -44,7 +44,7 @@ A security-research control plane built on Apple's `container` runtime. DAEDALUS
 
 - **macOS 26+** (Tahoe)
 - **Apple silicon** (arm64)
-- **container** installed at `/usr/local/bin/container` (v0.1.0+)
+- **container** installed at `/usr/local/bin/container` (1.2.2+)
 - **Python 3.12+**
 - **uv** package manager
 - **Node.js 22+** (for UI development only)
@@ -98,6 +98,7 @@ daedalus run alpine:latest -d --command "echo hello from daedalus"
 
 # 7. See it
 daedalus ls --all
+daedalus stats                        # live CPU/mem/net stats for running containers
 ```
 
 ---
@@ -123,6 +124,16 @@ daedalus exec <id> uname -a           # Run command inside
 daedalus logs <id>                    # View logs
 daedalus logs <id> --boot             # Boot-time logs
 daedalus destroy <id> --confirm       # Stop + delete
+daedalus stats                        # One-shot stats for all running containers
+daedalus stats <id>                   # One-shot stats for a single container
+daedalus cp <id>:/tmp/x ./x           # Copy a file out of a container
+daedalus cp ./x <id>:/tmp/x           # Copy a file into a container
+daedalus export <id> -o fs.tar        # Export full filesystem to a tar archive
+daedalus prune --confirm              # Remove stopped containers, reclaim disk
+daedalus network list                 # List networks
+daedalus network create lab-net --internal --subnet 172.31.0.0/24
+daedalus network inspect lab-net
+daedalus network delete lab-net --confirm
 
 # Images
 daedalus image-pull debian:latest     # Pull from registry
@@ -143,6 +154,11 @@ daedalus profiles                     # List security profiles
 | `exec` | Execute command inside container |
 | `logs` | Fetch container logs |
 | `destroy` | Stop + delete (requires --confirm) |
+| `stats` | One-shot resource stats (all running, or one container) |
+| `cp` | Copy files host↔container (`<id>:/path` on either side) |
+| `export` | Export a container filesystem to a tar archive |
+| `prune` | Remove stopped containers, reclaim disk (requires --confirm) |
+| `network` | Network CRUD subcommands: `create`, `list`, `inspect`, `delete` |
 | `image-pull` | Pull image from registry |
 | `image-list` | List local images |
 | `system-status` | Daemon + version + container count |
@@ -168,6 +184,15 @@ python -m daedalus.api.server
 | POST | `/containers` | Create + start a container |
 | GET | `/containers/{id}` | Inspect container |
 | DELETE | `/containers/{id}` | Destroy (`?confirm=true` required) |
+| GET | `/stats` | One-shot stats for all running containers |
+| GET | `/containers/{id}/stats` | One-shot stats for one container |
+| POST | `/containers/{id}/copy` | Copy to/from container (`{"source","destination","direction"}`) |
+| POST | `/containers/{id}/export` | Export FS to tar (`{"output_path"?}`) |
+| POST | `/containers/prune` | Remove stopped containers (`{"confirm":true}`) |
+| GET | `/networks` | List networks |
+| POST | `/networks` | Create a network |
+| GET | `/networks/{name}` | Inspect a network |
+| DELETE | `/networks/{name}` | Delete a network (`?confirm=true` required) |
 | POST | `/containers/{id}/stop` | Stop a running container |
 | POST | `/containers/{id}/start` | Start a stopped container |
 | POST | `/containers/{id}/exec` | Execute command (`{"command":["echo","hi"]}`) |
@@ -268,6 +293,14 @@ Add to your `mcp.json` or `~/.claude/config.json`:
 | `daedalus_logs` | Fetch container logs |
 | `daedalus_stop` | Stop a running container |
 | `daedalus_destroy` | Destroy container (requires `confirm=true`) |
+| `daedalus_stats` | One-shot resource stats (all or one container) |
+| `daedalus_copy` | Copy a file to/from a container |
+| `daedalus_export` | Export a container filesystem to a tar (store-indexed artifact) |
+| `daedalus_prune` | Remove stopped containers (requires `confirm=true`) |
+| `daedalus_network_list` | List networks |
+| `daedalus_network_create` | Create a network (policy-gated when routable) |
+| `daedalus_network_inspect` | Inspect a network |
+| `daedalus_network_delete` | Delete a network (requires `confirm=true`) |
 | `daedalus_image_pull` | Pull image from registry |
 | `daedalus_image_list` | List local images |
 | `daedalus_profiles` | List security profiles |
@@ -404,8 +437,8 @@ cd ui && npm run dev
 
 ```
 mypy --strict daedalus/     → Success: no issues found in 23 source files
-pytest -m unit              → 115 passed
-pytest -m integration       → 11 passed (requires container daemon)
+pytest tests/ -q            → 193 passed (177 unit + 16 integration)
+pytest -m integration       → 16 passed (requires container daemon)
 Proxy across 7 profiles     → All pass (CLI + API + MCP surfaces)
 UI build                    → TypeScript clean, 8/8 checks pass
 ruff check                  → cosmetic only (E501, SIM*, UP042)
@@ -422,7 +455,7 @@ container system kernel set --recommended
 ```
 
 **"failed to find plugin named container-network"**
-Networking is not yet wired in container v0.1.0. DNS control via `--dns` flags still works.
+Networking requires macOS 26+ and the `container-network-vmnet` plugin. On container 1.2.2 the `network` subcommand is fully wired — `daedalus network create/list/inspect/delete` drives real vmnet networks. If the plugin is missing, reinstall the runtime or check `/usr/local/libexec/container/plugins/`. DNS control via `--dns` flags works regardless.
 
 **Containers go straight to "stopped" state**
 Detached containers automatically stay alive in the background. If you override the command, make sure it doesn't exit immediately — some default CMDs like `/bin/sh` need stdin and exit instantly when detached. Leave the command blank for automatic keep-alive.

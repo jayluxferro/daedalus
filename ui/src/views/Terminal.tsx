@@ -3,7 +3,24 @@ import { Terminal as XTerm } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebglAddon } from '@xterm/addon-webgl'
 import '@xterm/xterm/css/xterm.css'
+import { useCopyFile } from '../api/containers'
+import type { CopyDirection } from '../api/containers'
 import { Box, GlassBox } from './shared'
+
+const inputStyle: React.CSSProperties = {
+  flex: 1, padding: '6px 10px', borderRadius: 6, border: '1px solid var(--border)',
+  background: '#0f0f13', color: 'var(--fg)', fontSize: 12, boxSizing: 'border-box',
+  minWidth: 0,
+}
+const selectStyle: React.CSSProperties = {
+  padding: '6px 10px', borderRadius: 6, border: '1px solid var(--border)',
+  background: '#0f0f13', color: 'var(--fg)', fontSize: 12,
+}
+const copyBtnStyle: React.CSSProperties = {
+  padding: '6px 14px', borderRadius: 6, border: '1px solid var(--border)',
+  background: '#3b82f6', color: 'white', cursor: 'pointer', fontSize: 12,
+  fontWeight: 500,
+}
 
 interface TerminalViewProps {
   containerId: string
@@ -20,6 +37,12 @@ export default function TerminalView({ containerId, onClose }: TerminalViewProps
   const lineBuf = useRef('')
   const history = useRef<string[]>([])
   const historyIdx = useRef(0)
+  const [showCopy, setShowCopy] = useState(false)
+  const [direction, setDirection] = useState<CopyDirection>('from')
+  const [srcPath, setSrcPath] = useState('')
+  const [dstPath, setDstPath] = useState('')
+  const [copyResult, setCopyResult] = useState<string | null>(null)
+  const copy = useCopyFile()
 
   const send = useCallback(async (cmd: string) => {
     if (cmd === 'exit' || cmd === 'logout') {
@@ -190,6 +213,60 @@ export default function TerminalView({ containerId, onClose }: TerminalViewProps
         width: '100%', height: 'calc(100vh - 200px)', minHeight: 400,
         borderRadius: 8, overflow: 'hidden',
       }} />
+
+      <GlassBox style={{ marginTop: 12, padding: 12 }}>
+        <button
+          onClick={() => setShowCopy(!showCopy)}
+          style={{ background: 'transparent', border: 'none', color: '#3b82f6', cursor: 'pointer', fontSize: 12, padding: 0, fontWeight: 500 }}
+        >
+          {showCopy ? '▾ Hide file copy' : '▸ File copy'}
+        </button>
+        {showCopy && (
+          <form
+            onSubmit={e => {
+              e.preventDefault()
+              copy.mutate(
+                { id: containerId, source: srcPath.trim(), destination: dstPath.trim(), direction },
+                {
+                  onSuccess: r => setCopyResult(r.path ? `Copied — ${r.path}` : 'Copied into container'),
+                  onError: err => setCopyResult((err as Error).message),
+                },
+              )
+            }}
+            style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 12 }}
+          >
+            <label style={{ fontSize: 11, color: 'var(--muted-fg)', display: 'flex', flexDirection: 'column', gap: 4 }}>
+              Direction
+              <select value={direction} onChange={e => setDirection(e.target.value as CopyDirection)} style={selectStyle}>
+                <option value="from">From container → host</option>
+                <option value="to">Host → into container</option>
+              </select>
+            </label>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              <input
+                value={srcPath}
+                onChange={e => setSrcPath(e.target.value)}
+                placeholder={direction === 'from' ? 'Container path (e.g. /etc/os-release)' : 'Host path (e.g. /tmp/notes.txt)'}
+                style={inputStyle}
+              />
+              <input
+                value={dstPath}
+                onChange={e => setDstPath(e.target.value)}
+                placeholder={direction === 'from' ? 'Host destination path (e.g. /tmp/out.txt)' : 'Container path (e.g. /root/notes.txt)'}
+                style={inputStyle}
+              />
+              <button type="submit" disabled={!srcPath.trim() || !dstPath.trim() || copy.isPending} style={copyBtnStyle}>
+                {copy.isPending ? 'Copying...' : 'Copy file'}
+              </button>
+            </div>
+            {copyResult && (
+              <p style={{ fontSize: 11, margin: 0, color: copy.isError ? 'var(--danger)' : '#22c55e', wordBreak: 'break-all' }}>
+                {copyResult}
+              </p>
+            )}
+          </form>
+        )}
+      </GlassBox>
     </Box>
   )
 }

@@ -1,12 +1,15 @@
 """L1 backend — shells ``container`` and parses output.
 
 This is the reference implementation.  It matches the **actual** command
-surface of container v0.1.0 (commit 0fd8692), not aspirational features.
+surface of container CLI 1.2.2 (commit 0190097), not aspirational
+features.
 
-JSON output is available for exactly three commands:
+Structured JSON output is available for these commands:
 * ``container list --format json``
 * ``container image list --format json``
 * ``container builder status --json``
+* ``container network list --format json``
+* ``container stats --no-stream --format json``
 
 All other commands produce text output that must be parsed.
 """
@@ -18,6 +21,7 @@ import builtins
 import json
 import os
 import shutil
+import time
 from typing import Any
 
 from daedalus.core.backend import (
@@ -26,12 +30,17 @@ from daedalus.core.backend import (
     ContainerInfo,
     ContainerState,
     ExecResult,
+    NetworkInfo,
+    NetworkSpec,
+    PruneResult,
     RunSpec,
+    StatsSample,
 )
 from daedalus.core.capabilities import CapabilityManifest
 from daedalus.core.exceptions import (
     BackendError,
     BackendTimeoutError,
+    CapabilityError,
 )
 
 # ==========================================================================
@@ -42,8 +51,9 @@ from daedalus.core.exceptions import (
 class OutputParser:
     """Strategies for parsing ``container`` CLI output.
 
-    Only three commands support ``--format json``.  Everything else
-    requires text parsing.
+    ``container list``, ``container image list``, ``container builder
+    status``, ``container network list`` and ``container stats`` support
+    structured JSON output.  Everything else requires text parsing.
     """
 
     @staticmethod
@@ -68,6 +78,112 @@ class OutputParser:
             return objects if objects else {}
 
     @staticmethod
+    def stats(text: str) -> list[StatsSample]:
+        """Parse ``container stats --no-stream --format json`` output.
+
+        The output is an array of per-container objects (SPEC §2.1).
+        ``cpuUsageUsec`` is cumulative; ``sampled_at`` is set to
+        :func:`time.monotonic` at parse time so callers can derive rates
+        between successive samples.
+        """
+        data = OutputParser.json(text)
+        items: list[dict[str, Any]] = []
+        if isinstance(data, list):
+            items = [item for item in data if isinstance(item, dict)]
+        elif isinstance(data, dict) and data:
+            items = [data]
+        sampled_at = time.monotonic()
+        return [
+            StatsSample(
+                id=str(item.get("id", "") or ""),
+                cpu_usage_usec=int(item.get("cpuUsageUsec", 0) or 0),
+                memory_usage_bytes=int(item.get("memoryUsageBytes", 0) or 0),
+                memory_limit_bytes=int(item.get("memoryLimitBytes", 0) or 0),
+                network_rx_bytes=int(item.get("networkRxBytes", 0) or 0),
+                network_tx_bytes=int(item.get("networkTxBytes", 0) or 0),
+                block_read_bytes=int(item.get("blockReadBytes", 0) or 0),
+                block_write_bytes=int(item.get("blockWriteBytes", 0) or 0),
+                num_processes=int(item.get("numProcesses", 0) or 0),
+                sampled_at=sampled_at,
+            )
+            for item in items
+        ]
+
+    @staticmethod
+    def network_list(text: str) -> list[NetworkInfo]:
+        """Parse ``container network list --format json`` output (SPEC §2.5)."""
+        data = OutputParser.json(text)
+        items: list[dict[str, Any]] = []
+        if isinstance(data, list):
+            items = [item for item in data if isinstance(item, dict)]
+        elif isinstance(data, dict) and data:
+            items = [data]
+        return [OutputParser._network_info(item) for item in items]
+
+    @staticmethod
+    def network_inspect(text: str) -> NetworkInfo:
+        """Parse ``container network inspect <name>`` output.
+
+        ``inspect`` prints a JSON array directly (no ``--format`` flag);
+        the first element describes the requested network.
+        """
+        data = OutputParser.json(text)
+        item: dict[str, Any] = {}
+        if isinstance(data, list) and data:
+            first = data[0]
+            if isinstance(first, dict):
+                item = first
+        elif isinstance(data, dict):
+            item = data
+        return OutputParser._network_info(item)
+
+    @staticmethod
+    def _network_info(item: dict[str, Any]) -> NetworkInfo:
+        """Map a single network list/inspect entry to :class:`NetworkInfo`."""
+        cfg = item.get("configuration", {})
+        if not isinstance(cfg, dict):
+            cfg = {}
+        status = item.get("status", {})
+        if not isinstance(status, dict):
+            status = {}
+        return NetworkInfo(
+            id=str(item.get("id", "") or ""),
+            name=str(cfg.get("name", "") or ""),
+            plugin=str(cfg.get("plugin", "") or ""),
+            mode=str(cfg.get("mode", "") or ""),
+            subnet=str(status.get("ipv4Subnet", "") or ""),
+            subnet_v6=str(status.get("ipv6Subnet", "") or ""),
+            gateway=str(status.get("ipv4Gateway", "") or ""),
+            raw=item,
+        )
+
+    @staticmethod
+    def reclaimed_message(text: str) -> str:
+        """Extract the ``Reclaimed …`` summary line from prune output.
+
+        container ≥ 1.x prints the summary to stderr; ids land on stdout.
+        """
+        for line in OutputParser.lines(text):
+            if line.startswith("Reclaimed "):
+                return line
+        return ""
+
+    @staticmethod
+    def prune(text: str) -> PruneResult:
+        """Parse ``container prune`` text output (SPEC §2.4).
+
+        The ``Reclaimed <size> in disk space`` line (when present)
+        becomes :attr:`PruneResult.message`; the remaining non-empty
+        lines are the removed container ids.
+        """
+        lines = OutputParser.lines(text)
+        message = OutputParser.reclaimed_message(text)
+        return PruneResult(
+            ids=[line for line in lines if line != message],
+            message=message,
+        )
+
+    @staticmethod
     def container_id(text: str) -> str:
         """Parse a container ID from ``container run`` / ``container create``.
 
@@ -85,10 +201,62 @@ class OutputParser:
         """Return non-empty lines."""
         return [l for l in text.strip().splitlines() if l.strip()]
 
+    @staticmethod
+    def container_item(item: dict[str, Any]) -> ContainerInfo:
+        """Parse one ``container list --format json`` element (container ≥ 1.x).
+
+        Wire shape: ``{configuration: {...}, id, status: {...}}`` where
+        ``status`` is a nested object (``state`` plus per-network info), not a
+        bare string.  The container name lives at
+        ``status.networks[0].hostname`` when ``configuration.hostname`` is
+        absent.
+        """
+        cfg = item.get("configuration", {}) if isinstance(item.get("configuration"), dict) else {}
+        img = cfg.get("image", {}) if isinstance(cfg.get("image"), dict) else {}
+        status = item.get("status", {}) if isinstance(item.get("status"), dict) else {}
+        name = cfg.get("hostname") or ""
+        if not name:
+            networks = status.get("networks") or []
+            if networks and isinstance(networks[0], dict):
+                name = networks[0].get("hostname", "")
+        return ContainerInfo(
+            id=cfg.get("id", ""),
+            name=name,
+            image=img.get("reference", ""),
+            state=_coerce_state(status.get("state", "unknown")),
+            raw=item,
+        )
+
+    @staticmethod
+    def image_list_item(item: dict[str, Any]) -> dict[str, Any]:
+        """Normalise one ``container image list --format json`` element.
+
+        container ≥ 1.x nests the reference at ``configuration.name`` and the
+        descriptor at ``configuration.descriptor``; older releases carried
+        both at the top level.  Expose a stable contract: ``reference``,
+        ``name`` and ``descriptor`` always present at the top level (derived
+        when the runtime nests them), everything else raw.
+        """
+        cfg = item.get("configuration", {}) if isinstance(item.get("configuration"), dict) else {}
+        ref = cfg.get("name") or item.get("reference", "")
+        item.setdefault("reference", ref)
+        item.setdefault("name", ref)
+        item.setdefault("descriptor", cfg.get("descriptor", {}))
+        return item
+
 
 # ==========================================================================
 # Helpers
 # ==========================================================================
+
+
+def _coerce_state(value: Any) -> ContainerState:
+    """Tolerant ``ContainerState`` coercion — unknown runtime states fall
+    back to ``UNKNOWN`` instead of raising."""
+    try:
+        return ContainerState(str(value))
+    except ValueError:
+        return ContainerState.UNKNOWN
 
 
 async def _run_cli_impl(
@@ -178,6 +346,21 @@ class CliBackend(Backend):
         self._binary = capabilities.container_binary
         self._caps = capabilities
 
+    def _require(self, feature: str) -> None:
+        """Raise :class:`CapabilityError` unless ``feature`` is available.
+
+        ``feature`` is a key of ``CapabilityManifest.runtime_features``
+        (e.g. ``"container_stats"``, ``"custom_networks"``).  Backends
+        gate on this so older hosts fail loudly with a clear message
+        instead of leaking ``container: unrecognized subcommand``.
+        """
+        if self._caps.runtime_features.get(feature) is not True:
+            raise CapabilityError(
+                message=f"Feature '{feature}' is not available on this host",
+                feature=feature,
+                container_version=self._caps.container_version,
+            )
+
     # -- escape hatch (used by Mint, Talos) -------------------------------
 
     async def _run_cli(
@@ -266,33 +449,25 @@ class CliBackend(Backend):
             items = [data]
         result: list[ContainerInfo] = []
         for item in items:
-            cfg = item.get("configuration", {}) if isinstance(item.get("configuration"), dict) else {}
-            img = cfg.get("image", {}) if isinstance(cfg.get("image"), dict) else {}
-            result.append(ContainerInfo(
-                id=cfg.get("id", ""),
-                name=cfg.get("hostname", ""),
-                image=img.get("reference", ""),
-                state=ContainerState(item.get("status", "unknown")),
-                created_at="",
-                raw=item,
-            ))
+            result.append(OutputParser.container_item(item))
         return result
 
     async def inspect(self, container_id: str) -> ContainerInfo:
-        _, out, _ = await _run_cli_impl(
-            "inspect", container_id, binary=self._binary,
+        exit_code, out, _ = await _run_cli_impl(
+            "inspect", container_id, binary=self._binary, check=False,
         )
+        if exit_code != 0:
+            # container ≥ 1.x exits non-zero for unknown ids; the contract is
+            # an empty result, not an error (see test_unknown_container_inspect).
+            return ContainerInfo(id="", name="", image="", state=ContainerState.UNKNOWN)
         data = OutputParser.json(out)
         if isinstance(data, list):
             data = data[0] if data else {}
         if isinstance(data, dict) and data:
-            return ContainerInfo(
-                id=data.get("configuration", {}).get("id", data.get("id", container_id)),
-                name=data.get("configuration", {}).get("hostname", ""),
-                image=data.get("configuration", {}).get("image", {}).get("reference", ""),
-                state=ContainerState(data.get("status", "unknown")),
-                raw=data,
-            )
+            info = OutputParser.container_item(data)
+            if not info.id:
+                info.id = container_id
+            return info
         # No data returned — container not found
         return ContainerInfo(id="", name="", image="", state=ContainerState.UNKNOWN)
 
@@ -318,6 +493,70 @@ class CliBackend(Backend):
             )
         _, out, _ = await _run_cli_impl(*cmd, binary=self._binary)
         return out
+
+    # ==================================================================
+    # Stats / copy / export / prune / network (container 1.2.2)
+    # ==================================================================
+
+    async def stats(self, container_id: str | None = None) -> list[StatsSample]:
+        self._require("container_stats")
+        cmd = ["stats", "--no-stream", "--format", "json"]
+        if container_id:
+            cmd.append(container_id)
+        _, out, _ = await _run_cli_impl(*cmd, binary=self._binary)
+        return OutputParser.stats(out)
+
+    async def copy(self, source: str, destination: str) -> str:
+        self._require("container_copy")
+        _, out, _ = await _run_cli_impl(
+            "copy", source, destination, binary=self._binary,
+        )
+        return out
+
+    async def export(self, container_id: str, output_path: str) -> str:
+        self._require("container_export")
+        await _run_cli_impl(
+            "export", "-o", output_path, container_id, binary=self._binary,
+        )
+        return output_path
+
+    async def prune(self) -> PruneResult:
+        self._require("container_prune")
+        _, out, err = await _run_cli_impl("prune", binary=self._binary)
+        # The "Reclaimed …" summary is printed to stderr; ids to stdout.
+        result = OutputParser.prune(out)
+        if not result.message:
+            result.message = OutputParser.reclaimed_message(err)
+        return result
+
+    async def network_create(self, spec: NetworkSpec) -> NetworkInfo:
+        self._require("custom_networks")
+        _, out, _ = await _run_cli_impl(
+            "network", "create", *spec.to_cli_args(), binary=self._binary,
+        )
+        # Create output may be minimal — resolve the full info via inspect.
+        lines = OutputParser.lines(out)
+        name = lines[-1] if lines else spec.name
+        return await self.network_inspect(name)
+
+    async def network_list(self) -> list[NetworkInfo]:
+        self._require("custom_networks")
+        _, out, _ = await _run_cli_impl(
+            "network", "list", "--format", "json", binary=self._binary,
+        )
+        return OutputParser.network_list(out)
+
+    async def network_inspect(self, name: str) -> NetworkInfo:
+        self._require("custom_networks")
+        # NOTE: no --format flag — inspect errors when given one.
+        _, out, _ = await _run_cli_impl(
+            "network", "inspect", name, binary=self._binary,
+        )
+        return OutputParser.network_inspect(out)
+
+    async def network_delete(self, name: str) -> None:
+        self._require("custom_networks")
+        await _run_cli_impl("network", "delete", name, binary=self._binary)
 
     # ==================================================================
     # Interaction
@@ -432,10 +671,9 @@ class CliBackend(Backend):
         _, out, _ = await _run_cli_impl(*cmd, binary=self._binary)
         data = OutputParser.json(out)
         if isinstance(data, list):
-            result: list[dict[str, Any]] = [item for item in data if isinstance(item, dict)]
-            return result
+            return [OutputParser.image_list_item(item) for item in data if isinstance(item, dict)]
         if isinstance(data, dict):
-            return [dict(data)]
+            return [OutputParser.image_list_item(dict(data))]
         return []  # type: ignore[unreachable]
 
     async def image_prune(self) -> builtins.list[str]:
@@ -600,8 +838,10 @@ class CliBackend(Backend):
         return OutputParser.lines(out)
 
     async def system_df(self) -> dict[str, Any]:
-        """Disk usage — OS-level fallback since ``container system df``
-        does not exist in v0.1.0.
+        """Disk usage — measured at the OS level via ``shutil.disk_usage``.
+
+        (``container system df`` exists in 1.2.2, but this host-side
+        measurement is the one policy checks compare against.)
 
         Returns volume stats plus ``store_bytes``: actual size of the Apple
         container data directory (used for policy checks).  ``used`` is the

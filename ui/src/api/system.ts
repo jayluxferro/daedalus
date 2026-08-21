@@ -77,3 +77,66 @@ export function useSystemRestart() {
     mutationFn: () => apiPost<{ status: string }>('/system/restart'),
   })
 }
+
+// ---------------------------------------------------------------------------
+// Networks (container 1.2.2)
+// ---------------------------------------------------------------------------
+
+export interface NetworkInfo {
+  id: string
+  name: string
+  plugin: string
+  mode: string
+  subnet: string
+  subnet_v6: string
+  gateway: string
+}
+
+export interface NetworkCreateBody {
+  name: string
+  subnet?: string
+  subnet_v6?: string
+  internal: boolean
+  plugin?: string
+  options?: Record<string, string>
+}
+
+export function getNetworks() {
+  return apiGet<NetworkInfo[]>('/networks')
+}
+
+export function useNetworks() {
+  return useQuery({
+    queryKey: ['networks'],
+    queryFn: () => getNetworks(),
+    refetchInterval: 3000,
+  })
+}
+
+export function createNetwork(body: NetworkCreateBody) {
+  return apiPost<NetworkInfo>('/networks', body)
+}
+
+export function useCreateNetwork() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (body: NetworkCreateBody) => createNetwork(body),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['networks'] }),
+  })
+}
+
+export function getNetwork(name: string) {
+  return apiGet<NetworkInfo>(`/networks/${encodeURIComponent(name)}`)
+}
+
+export function deleteNetwork(name: string) {
+  return apiDelete<{ status: string; name: string }>(`/networks/${encodeURIComponent(name)}?confirm=true`)
+}
+
+export function useDeleteNetwork() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (name: string) => deleteNetwork(name),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['networks'] }),
+  })
+}

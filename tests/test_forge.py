@@ -10,7 +10,11 @@ from daedalus.core.backend import (
     ContainerInfo,
     ContainerState,
     ExecResult,
+    NetworkInfo,
+    NetworkSpec,
+    PruneResult,
     RunSpec,
+    StatsSample,
 )
 from daedalus.core.capabilities import CapabilityManifest
 from daedalus.core.exceptions import PolicyViolationError, ValidationError
@@ -30,6 +34,23 @@ class MockBackend(Backend):
         self.containers: dict[str, ContainerInfo] = {}
         self.next_id = 1
         self.last_spec: RunSpec | None = None
+        self.stats_calls: list[str | None] = []
+        self.stats_result: list[StatsSample] = [
+            StatsSample(
+                id="mock-0001",
+                cpu_usage_usec=2_219,
+                memory_usage_bytes=2_764_800,
+                memory_limit_bytes=1_073_741_824,
+                network_rx_bytes=28_040,
+                network_tx_bytes=602,
+                block_read_bytes=2_596_864,
+                block_write_bytes=0,
+                num_processes=1,
+            ),
+        ]
+        self.networks: dict[str, NetworkInfo] = {}
+        self.network_create_calls: list[NetworkSpec] = []
+        self.network_delete_calls: list[str] = []
 
     def _cid(self) -> str:
         cid = f"mock-{self.next_id:04d}"
@@ -166,6 +187,29 @@ class MockBackend(Backend):
         return []
     async def system_df(self) -> dict:
         return {"total": 100_000_000_000, "used": 5_000_000_000, "free": 95_000_000_000}
+
+    # -- stats / copy / export / prune / network (no-op canned stubs) --
+    async def stats(self, container_id: str | None = None) -> list[StatsSample]:
+        self.stats_calls.append(container_id)
+        return list(self.stats_result)
+    async def copy(self, source: str, destination: str) -> str:
+        return destination
+    async def export(self, container_id: str, output_path: str) -> str:
+        return output_path
+    async def prune(self) -> PruneResult:
+        return PruneResult()
+    async def network_create(self, spec: NetworkSpec) -> NetworkInfo:
+        self.network_create_calls.append(spec)
+        info = NetworkInfo(id=spec.name, name=spec.name, raw={"mock": True})
+        self.networks[spec.name] = info
+        return info
+    async def network_list(self) -> list[NetworkInfo]:
+        return list(self.networks.values())
+    async def network_inspect(self, name: str) -> NetworkInfo:
+        return self.networks.get(name, NetworkInfo(id=name, name=name))
+    async def network_delete(self, name: str) -> None:
+        self.network_delete_calls.append(name)
+        self.networks.pop(name, None)
 
     async def _run_cli(self, *args: str, **kwargs: object) -> tuple[int, str, str]:
         return (0, "", "")
@@ -353,3 +397,24 @@ class TestSystem:
         status = await forge.system_status()
         assert status.container_count == 2
         assert status.running_count == 2
+
+
+# ------------------------------------------------------------------
+# Stats tests
+# ------------------------------------------------------------------
+
+
+class TestStats:
+    async def test_stats_delegates(self, forge: Forge):
+        backend = forge.backend
+        assert isinstance(backend, MockBackend)
+        samples = await forge.stats("mock-0001")
+        assert samples == backend.stats_result
+        assert backend.stats_calls == ["mock-0001"]
+
+    async def test_stats_all(self, forge: Forge):
+        backend = forge.backend
+        assert isinstance(backend, MockBackend)
+        samples = await forge.stats()
+        assert samples == backend.stats_result
+        assert backend.stats_calls == [None]

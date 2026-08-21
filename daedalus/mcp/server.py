@@ -16,14 +16,16 @@ import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from typing import Any
 
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import ToolAnnotations
 
 from daedalus.core.audit import ActorKind, AuditLog
+from daedalus.core.backend import NetworkInfo, NetworkSpec
 from daedalus.core.capabilities import ensure_daemon, probe
 from daedalus.core.cli_backend import CliBackend
-from daedalus.core.exceptions import DaedalusError
+from daedalus.core.exceptions import DaedalusError, ValidationError
 from daedalus.core.forge import Forge
 from daedalus.core.icarus import ExecOptions, Icarus
 from daedalus.core.mint import Mint
@@ -81,9 +83,9 @@ async def daedalus_lifespan(server: FastMCP) -> AsyncIterator[DaedalusContext]:
         caps=caps,
         backend=backend,
         forge=Forge(backend, caps, policy=policy, audit=audit, store=store),
-        icarus=Icarus(backend, audit=audit, runtime_binary=caps.container_binary),
+        icarus=Icarus(backend, audit=audit, store=store, runtime_binary=caps.container_binary),
         mint=Mint(backend, audit=audit),
-        talos=Talos(backend, caps, audit=audit),
+        talos=Talos(backend, caps, policy=policy, audit=audit),
         profiles=ProfileRegistry(),
         policy=policy,
         audit=audit,
@@ -131,6 +133,19 @@ def _err(exc: DaedalusError) -> str:
     raise ValueError(json.dumps(exc.to_dict()))
 
 
+def _network_dict(n: NetworkInfo) -> dict[str, Any]:
+    """Serialise a ``NetworkInfo`` as a flat dict."""
+    return {
+        "id": n.id,
+        "name": n.name,
+        "plugin": n.plugin,
+        "mode": n.mode,
+        "subnet": n.subnet,
+        "subnet_v6": n.subnet_v6,
+        "gateway": n.gateway,
+    }
+
+
 # ==========================================================================
 # Server
 # ==========================================================================
@@ -145,11 +160,15 @@ Core capabilities:
 - Create and manage disposable Linux VMs via `daedalus_run`
 - Execute commands inside containers via `daedalus_exec`
 - Pull and manage OCI container images via `daedalus_image_*`
+- Sample resource usage via `daedalus_stats`
+- Copy files and export filesystems via `daedalus_copy` / `daedalus_export`
+- Manage container networks via `daedalus_network_*`
 - Control system DNS via `daedalus_dns_*`
 
 Safety rules:
 1. ALWAYS call `daedalus_health` first to check what the host supports
-2. Destructive operations (`daedalus_destroy`, `daedalus_dns_delete`)
+2. Destructive operations (`daedalus_destroy`, `daedalus_prune`,
+   `daedalus_dns_delete`, `daedalus_network_delete`)
    require `confirm=True` and are logged in the audit trail
 3. The default `detonation` profile applies maximum isolation
 4. Kernel overrides require `confirm_kernel=True` on `daedalus_run`
@@ -478,7 +497,11 @@ async def daedalus_start(
         idempotentHint=False,
     ),
 )
-async def daedalus_destroy(container_id: str, confirm: bool = False, ctx: Context | None = None) -> str:
+async def daedalus_destroy(
+    container_id: str,
+    confirm: bool = False,
+    ctx: Context | None = None,
+) -> str:
     """Destroy a container (stop then delete permanently).
 
     **WARNING**: Destructive operation. Must pass confirm=True.
@@ -1265,7 +1288,11 @@ async def daedalus_dns_create(domain: str, ctx: Context) -> str:
         idempotentHint=False,
     ),
 )
-async def daedalus_dns_delete(domain: str, confirm: bool = False, ctx: Context | None = None) -> str:
+async def daedalus_dns_delete(
+    domain: str,
+    confirm: bool = False,
+    ctx: Context | None = None,
+) -> str:
     """Delete a local DNS domain. Requires confirm=True."""
     if not confirm:
         raise ValueError(json.dumps({
@@ -1277,6 +1304,263 @@ async def daedalus_dns_delete(domain: str, confirm: bool = False, ctx: Context |
         await dc.talos.system_dns_delete(domain)
         _audit_agent(dc, "system_dns_delete", {"domain": domain, "confirm": confirm})
         return _ok({"domain": domain, "deleted": True})
+    except DaedalusError as e:
+        return _err(e)
+
+
+# ==========================================================================
+# Stats / Copy / Export / Prune / Networks (container 1.2.2)
+# ==========================================================================
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Container resource statistics",
+        readOnlyHint=True,
+        idempotentHint=True,
+    ),
+)
+async def daedalus_stats(
+    container_id: str | None = None,
+    ctx: Context | None = None,
+) -> str:
+    """One-shot resource statistics for a container (or all running).
+
+    Omit container_id to sample every running container.  Returns a JSON
+    array of samples with cumulative values: cpu_usage_usec,
+    memory_usage_bytes, memory_limit_bytes, network_rx_bytes,
+    network_tx_bytes, block_read_bytes, block_write_bytes,
+    num_processes, sampled_at.
+    """
+    dc = _get_ctx(ctx)
+    try:
+        samples = await dc.forge.stats(container_id)
+        return json.dumps([s.to_dict() for s in samples])
+    except DaedalusError as e:
+        return _err(e)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Copy files between host and container",
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=True,
+    ),
+)
+async def daedalus_copy(
+    container_id: str,
+    source: str,
+    destination: str,
+    direction: str = "from",
+    ctx: Context | None = None,
+) -> str:
+    """Copy a file or directory across the host—container boundary.
+
+    direction="from" copies FROM the container (source = container path,
+    destination = host path); direction="to" copies INTO the container
+    (source = host path, destination = container path).  The container id
+    is always taken from container_id — never from a user-supplied
+    prefix.
+    """
+    dc = _get_ctx(ctx)
+    if direction not in ("from", "to"):
+        return _err(ValidationError(
+            f"direction must be 'from' or 'to', got {direction!r}",
+            direction=direction,
+        ))
+    try:
+        if direction == "from":
+            output = await dc.icarus.copy_from(container_id, source, destination)
+        else:
+            output = await dc.icarus.copy_to(container_id, source, destination)
+        _audit_agent(dc, f"copy_{direction}", {
+            "container_id": container_id,
+            "source": source,
+            "destination": destination,
+        }, {"output": output})
+        return _ok({
+            "container_id": container_id,
+            "direction": direction,
+            "source": source,
+            "destination": destination,
+            "output": output,
+        })
+    except DaedalusError as e:
+        return _err(e)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Export container filesystem to tar archive",
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+    ),
+)
+async def daedalus_export(
+    container_id: str,
+    output_path: str | None = None,
+    ctx: Context | None = None,
+) -> str:
+    """Export a container's full filesystem to a tar archive.
+
+    Defaults to <store root>/<container_id>.fs.tar and indexes the
+    archive as a store artifact (kind="fs").  Returns {path,
+    container_id, artifact}.
+    """
+    dc = _get_ctx(ctx)
+    try:
+        result = await dc.icarus.export_fs(container_id, output_path)
+        _audit_agent(dc, "export", {
+            "container_id": container_id,
+            "output_path": output_path,
+        }, result)
+        return _ok(result)
+    except DaedalusError as e:
+        return _err(e)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Prune stopped containers",
+        readOnlyHint=False,
+        destructiveHint=True,
+        idempotentHint=False,
+    ),
+)
+async def daedalus_prune(confirm: bool = False, ctx: Context | None = None) -> str:
+    """Remove stopped containers and reclaim disk space.
+
+    **WARNING**: Destructive operation. Must pass confirm=True.
+    Returns {ids, message, count}.
+    """
+    if not confirm:
+        raise ValueError(json.dumps({
+            "error": "confirm=True required for container prune",
+            "code": "CONFIRM_REQUIRED",
+        }))
+    dc = _get_ctx(ctx)
+    try:
+        result = await dc.backend.prune()
+        payload = {
+            "ids": result.ids,
+            "message": result.message,
+            "count": len(result.ids),
+        }
+        _audit_agent(dc, "prune", {"confirm": confirm}, payload)
+        return _ok(payload)
+    except DaedalusError as e:
+        return _err(e)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="List container networks",
+        readOnlyHint=True,
+        idempotentHint=True,
+    ),
+)
+async def daedalus_network_list(ctx: Context | None = None) -> str:
+    """List container networks.
+
+    Returns a JSON array of {id, name, plugin, mode, subnet, subnet_v6,
+    gateway} objects.
+    """
+    dc = _get_ctx(ctx)
+    try:
+        networks = await dc.talos.network_list()
+        return json.dumps([_network_dict(n) for n in networks])
+    except DaedalusError as e:
+        return _err(e)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Create a container network",
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+    ),
+)
+async def daedalus_network_create(
+    name: str,
+    subnet: str | None = None,
+    subnet_v6: str | None = None,
+    internal: bool = False,
+    plugin: str = "container-network-vmnet",
+    ctx: Context | None = None,
+) -> str:
+    """Create a container network.
+
+    **NOTE**: internal=False creates a host-routable network, which is
+    policy-gated — it is rejected with an error unless the policy allows
+    exposure.  Use internal=True for an air-gapped internal network.
+    Returns {id, name, plugin, mode, subnet, subnet_v6, gateway}.
+    """
+    dc = _get_ctx(ctx)
+    try:
+        spec = NetworkSpec(
+            name=name, subnet=subnet, subnet_v6=subnet_v6,
+            internal=internal, plugin=plugin,
+        )
+        info = await dc.talos.network_create(spec)
+        _audit_agent(dc, "network_create", {
+            "name": name, "subnet": subnet, "subnet_v6": subnet_v6,
+            "internal": internal, "plugin": plugin,
+        }, _network_dict(info))
+        return _ok(_network_dict(info))
+    except DaedalusError as e:
+        return _err(e)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Inspect a container network",
+        readOnlyHint=True,
+        idempotentHint=True,
+    ),
+)
+async def daedalus_network_inspect(name: str, ctx: Context | None = None) -> str:
+    """Inspect a single container network.
+
+    Returns {id, name, plugin, mode, subnet, subnet_v6, gateway}.
+    """
+    dc = _get_ctx(ctx)
+    try:
+        info = await dc.talos.network_inspect(name)
+        return _ok(_network_dict(info))
+    except DaedalusError as e:
+        return _err(e)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Delete a container network",
+        readOnlyHint=False,
+        destructiveHint=True,
+        idempotentHint=False,
+    ),
+)
+async def daedalus_network_delete(
+    name: str,
+    confirm: bool = False,
+    ctx: Context | None = None,
+) -> str:
+    """Delete a container network. Requires confirm=True.
+
+    **WARNING**: Destructive operation. Must pass confirm=True.
+    """
+    if not confirm:
+        raise ValueError(json.dumps({
+            "error": "confirm=True required for network deletion",
+            "code": "CONFIRM_REQUIRED",
+        }))
+    dc = _get_ctx(ctx)
+    try:
+        await dc.talos.network_delete(name, confirm=True)
+        _audit_agent(dc, "network_delete", {"name": name, "confirm": confirm})
+        return _ok({"name": name, "deleted": True})
     except DaedalusError as e:
         return _err(e)
 

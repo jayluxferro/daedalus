@@ -124,10 +124,13 @@ class CapabilityError(DaedalusError):
         message: str = "Required capability is not available",
         feature: str = "",
         hint: str = "",
+        container_version: str = "",
     ) -> None:
         details: dict[str, Any] = {"feature": feature}
         if hint:
             details["hint"] = hint
+        if container_version:
+            details["container_version"] = container_version
         super().__init__(code=code, message=message, details=details)
 
 

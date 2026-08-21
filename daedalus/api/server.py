@@ -16,6 +16,17 @@ Endpoints::
     GET  /containers/{id}/logs
     GET  /containers/{id}/logs/stream  (SSE)
     WS   /containers/{id}/exec         (WebSocket interactive terminal)
+    GET  /containers/{id}/stats
+    POST /containers/{id}/copy
+    POST /containers/{id}/export
+    POST /containers/prune
+    GET  /stats
+
+    # Networks
+    GET  /networks
+    POST /networks
+    GET  /networks/{name}
+    DELETE /networks/{name}
 
     # Images
     GET  /images
@@ -38,26 +49,24 @@ Endpoints::
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import asdict
-from typing import Any
+from typing import Any, Literal
 
 import yaml
-
-from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from daedalus.core.audit import ActorKind, AuditLog
+from daedalus.core.backend import BuildSpec, NetworkSpec
 from daedalus.core.capabilities import ensure_daemon, probe
 from daedalus.core.cli_backend import CliBackend
 from daedalus.core.exceptions import DaedalusError
-from daedalus.core.backend import BuildSpec
 from daedalus.core.forge import Forge
 from daedalus.core.icarus import ExecOptions, Icarus
 from daedalus.core.mint import Mint
@@ -91,6 +100,10 @@ class RunRequest(BaseModel):
     env: dict[str, str] | None = None
     workdir: str | None = None
     confirm_kernel: bool = False
+    network: str | None = None       # --network <name> (attach)
+    publish: list[str] = []          # -p spec, repeatable
+    cap_add: list[str] = []          # --cap-add
+    cap_drop: list[str] = []         # --cap-drop
 
 
 class ImageTagRequest(BaseModel):
@@ -118,7 +131,6 @@ class SystemKernelSetRequest(BaseModel):
 
 
 def _container_dict(lab: Any) -> dict[str, Any]:
-    raw = lab.info.raw
     return {
         "id": lab.id,
         "name": lab.name,
@@ -127,6 +139,18 @@ def _container_dict(lab: Any) -> dict[str, Any]:
         "profile": lab.profile,
         "ip": "",
         "networks": [],
+    }
+
+
+def _network_dict(net: Any) -> dict[str, Any]:
+    return {
+        "id": net.id,
+        "name": net.name,
+        "plugin": net.plugin,
+        "mode": net.mode,
+        "subnet": net.subnet,
+        "subnet_v6": net.subnet_v6,
+        "gateway": net.gateway,
     }
 
 
@@ -154,6 +178,29 @@ class BuildRequest(BaseModel):
 
 class TopologyValidateRequest(BaseModel):
     content: str
+
+
+class CopyRequest(BaseModel):
+    source: str
+    destination: str
+    direction: Literal["from", "to"]
+
+
+class ExportRequest(BaseModel):
+    output_path: str | None = None
+
+
+class PruneRequest(BaseModel):
+    confirm: bool = False
+
+
+class NetworkCreateRequest(BaseModel):
+    name: str
+    subnet: str | None = None
+    subnet_v6: str | None = None
+    internal: bool = False
+    plugin: str | None = None
+    options: dict[str, str] = {}
 
 
 # ==========================================================================
@@ -194,9 +241,9 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         "caps": caps,
         "backend": backend,
         "forge": Forge(backend, caps, policy=policy, audit=audit, store=store),
-        "icarus": Icarus(backend, audit=audit, runtime_binary=caps.container_binary),
+        "icarus": Icarus(backend, audit=audit, store=store, runtime_binary=caps.container_binary),
         "mint": Mint(backend, audit=audit),
-        "talos": Talos(backend, caps, audit=audit),
+        "talos": Talos(backend, caps, policy=policy, audit=audit),
         "profiles": ProfileRegistry(),
         "audit": audit,
         "store": store,
@@ -282,6 +329,14 @@ async def create_container(req: RunRequest) -> dict[str, Any]:
         overrides["cert_path"] = req.cert_path
     if req.no_proxy is not None:
         overrides["no_proxy"] = req.no_proxy
+    if req.network is not None:
+        overrides["network"] = req.network
+    if req.publish:
+        overrides["publish"] = req.publish
+    if req.cap_add:
+        overrides["cap_add"] = req.cap_add
+    if req.cap_drop:
+        overrides["cap_drop"] = req.cap_drop
     overrides["remove"] = req.remove
     kwargs = p.apply(**overrides)
     forge: Any = s["forge"]
@@ -444,7 +499,7 @@ async def container_logs_stream(
                     seen.add(line)
                     yield f"data: {line}\n\n"
         except Exception:
-            yield f"event: error\ndata: container not found\n\n"
+            yield "event: error\ndata: container not found\n\n"
             return
         while True:
             if await request.is_disconnected():
@@ -456,7 +511,7 @@ async def container_logs_stream(
                         seen.add(line)
                         yield f"data: {line}\n\n"
             except Exception:
-                yield f"event: error\ndata: log stream interrupted\n\n"
+                yield "event: error\ndata: log stream interrupted\n\n"
                 return
             await asyncio.sleep(1)
 
@@ -476,6 +531,109 @@ async def container_report(container_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="report not found")
     with open(path) as f:
         return json.load(f)
+
+
+# ==========================================================================
+# Stats, copy, export, prune (container 1.2.2)
+# ==========================================================================
+
+
+@app.get("/stats")
+async def stats_all() -> list[dict[str, Any]]:
+    """One-shot resource statistics for all running containers."""
+    s = _get_state()
+    samples = await s["forge"].stats()
+    return [sample.to_dict() for sample in samples]
+
+
+@app.get("/containers/{container_id}/stats")
+async def container_stats(container_id: str) -> list[dict[str, Any]]:
+    """One-shot resource statistics for a single container."""
+    s = _get_state()
+    samples = await s["forge"].stats(container_id)
+    return [sample.to_dict() for sample in samples]
+
+
+@app.post("/containers/{container_id}/copy")
+async def container_copy(container_id: str, req: CopyRequest) -> dict[str, Any]:
+    """Copy a file between a container and the host.
+
+    ``direction`` of "from" copies out of the container
+    (``source`` = container path, ``destination`` = host path); "to"
+    copies into the container (``source`` = host path,
+    ``destination`` = container path).
+    """
+    s = _get_state()
+    icarus: Any = s["icarus"]
+    if req.direction == "from":
+        result = await icarus.copy_from(container_id, req.source, req.destination)
+    else:
+        result = await icarus.copy_to(container_id, req.source, req.destination)
+    return {"path": result}
+
+
+@app.post("/containers/{container_id}/export")
+async def container_export(container_id: str, req: ExportRequest) -> dict[str, Any]:
+    """Export a container's full filesystem to a tar archive."""
+    s = _get_state()
+    return await s["icarus"].export_fs(container_id, output_path=req.output_path)
+
+
+@app.post("/containers/prune")
+async def containers_prune(req: PruneRequest) -> dict[str, Any]:
+    """Prune stopped containers (destructive — confirm required)."""
+    if not req.confirm:
+        raise HTTPException(status_code=400, detail="confirm=true required for prune")
+    s = _get_state()
+    result = await s["backend"].prune()
+    return asdict(result)
+
+
+# ==========================================================================
+# Networks (container 1.2.2)
+# ==========================================================================
+
+
+@app.get("/networks")
+async def network_list() -> list[dict[str, Any]]:
+    """List all networks."""
+    s = _get_state()
+    networks = await s["talos"].network_list()
+    return [_network_dict(n) for n in networks]
+
+
+@app.post("/networks")
+async def network_create(req: NetworkCreateRequest) -> dict[str, Any]:
+    """Create a network."""
+    s = _get_state()
+    spec = NetworkSpec(
+        name=req.name,
+        subnet=req.subnet,
+        subnet_v6=req.subnet_v6,
+        internal=req.internal,
+        plugin=req.plugin or "container-network-vmnet",
+        options=req.options,
+    )
+    info = await s["talos"].network_create(spec)
+    return _network_dict(info)
+
+
+@app.get("/networks/{name}")
+async def network_inspect(name: str) -> dict[str, Any]:
+    """Inspect a single network."""
+    s = _get_state()
+    info = await s["talos"].network_inspect(name)
+    return _network_dict(info)
+
+
+@app.delete("/networks/{name}")
+async def network_delete(name: str, confirm: bool = Query(False)) -> dict[str, Any]:
+    """Delete a network (destructive — confirm required)."""
+    if not confirm:
+        raise HTTPException(status_code=400, detail="confirm=true required for deletion")
+    s = _get_state()
+    await s["talos"].network_delete(name, confirm=True)
+    return {"status": "deleted", "name": name}
 
 
 # ==========================================================================
@@ -980,7 +1138,10 @@ async def system_events_stream(request: Request) -> StreamingResponse:
                 running = sum(1 for lab in labs if lab.state == "running")
                 snapshot = (count, running)
                 if snapshot != prev:
-                    yield f"event: status\ndata: {json.dumps({'total': count, 'running': running})}\n\n"
+                    yield (
+                        f"event: status\ndata: "
+                        f"{json.dumps({'total': count, 'running': running})}\n\n"
+                    )
                     prev = snapshot
             except Exception:
                 pass

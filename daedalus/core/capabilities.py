@@ -58,6 +58,11 @@ class CapabilityManifest:
     builder: bool | str = "untested"
     system_dns: bool | str = "untested"
     gpu: bool | str = "untested"
+    stats: bool | str = "untested"
+    copy: bool | str = "untested"
+    export: bool | str = "untested"
+    prune: bool | str = "untested"
+    network_subcommand: bool | str = "untested"
 
     # -- flag inventory (from --help parsing) ----------------------------
     known_flags: set[str] = field(default_factory=set)
@@ -106,6 +111,11 @@ class CapabilityManifest:
             f"builder:      {self._fmt(self.builder)}",
             f"system-dns:   {self._fmt(self.system_dns)}",
             f"gpu:          {self._fmt(self.gpu)}",
+            f"stats:        {self._fmt(self.stats)}",
+            f"copy:         {self._fmt(self.copy)}",
+            f"export:       {self._fmt(self.export)}",
+            f"prune:        {self._fmt(self.prune)}",
+            f"net-subcmd:   {self._fmt(self.network_subcommand)}",
         ]
         if self.extra_flags:
             lines.append("─────────────────────────────────")
@@ -145,7 +155,8 @@ EXPECTED_FLAGS: set[str] = {
 SUBCOMMANDS: set[str] = {
     "create", "delete", "exec", "inspect", "kill", "list", "logs",
     "run", "start", "stop", "build", "images", "image", "registry",
-    "builder", "system",
+    "builder", "system", "stats", "copy", "export", "prune", "network",
+    "machine", "volume",
 }
 
 
@@ -203,6 +214,11 @@ def probe(*, container_path: str | None = None) -> CapabilityManifest:
     m.builder = _probe_builder(m)
     m.system_dns = _probe_system_dns(m)
     m.gpu = _probe_gpu(m)
+    m.stats = _probe_subcommand(m.container_binary, "stats")
+    m.copy = _probe_subcommand(m.container_binary, "copy")
+    m.export = _probe_subcommand(m.container_binary, "export")
+    m.prune = _probe_subcommand(m.container_binary, "prune")
+    m.network_subcommand = _probe_network_subcommand(m)
     m.runtime_features = _runtime_features(m)
 
     m.probe_time = _now()
@@ -225,7 +241,7 @@ def _container_version(binary: str) -> tuple[str, str]:
 
     Output format::
 
-        container CLI version 0.1.0 (build: release, commit: 0fd8692)
+        container CLI version 1.2.2 (build: release, commit: 0190097)
     """
     try:
         r = subprocess.run(
@@ -333,10 +349,9 @@ def _flag_inventory(binary: str) -> tuple[set[str], set[str]]:
 def _probe_networking(m: CapabilityManifest) -> bool | str:
     """Check if the network plugin is installed and usable.
 
-    Networking in container v0.1.x is via the ``container-network-vmnet``
-    plugin at ``/usr/local/libexec/container/plugins/``.  The top-level
-    ``container network`` subcommand may not be wired yet; check for the
-    plugin binary instead.
+    Networking is provided by the ``container-network-vmnet`` plugin at
+    ``/usr/local/libexec/container/plugins/``.  Check for the plugin
+    binary first, falling back to the ``container network`` subcommand.
     """
     if not m.is_macos_26_plus:
         return False
@@ -346,7 +361,7 @@ def _probe_networking(m: CapabilityManifest) -> bool | str:
     )
     if os.path.exists(plugin_path):
         return True
-    # Also try the network subcommand (may work in future versions)
+    # Fall back to the network subcommand
     try:
         r = subprocess.run(
             [m.container_binary, "network", "ls"],
@@ -462,7 +477,6 @@ def _runtime_features(m: CapabilityManifest) -> dict[str, bool | str]:
     flags = m.known_flags
     has_mount = "mount" in flags and "volume" in flags
     has_publish = "publish" in flags or "p" in flags
-    has_network_cmd = _probe_network_subcommand(m)
     return {
         "port_forwarding": bool(has_publish),
         "vmnet_host_access": m.networking is True,
@@ -470,12 +484,33 @@ def _runtime_features(m: CapabilityManifest) -> dict[str, bool | str]:
         "volume_hot_attach": False,
         "oci_image_load": True,
         "iso_raw_disk_images": False,
-        "custom_networks": has_network_cmd is True,
+        "custom_networks": m.network_subcommand is True,
+        "container_stats": m.stats is True,
+        "container_copy": m.copy is True,
+        "container_export": m.export is True,
+        "container_prune": m.prune is True,
         "shared_default_network": m.networking is True,
     }
 
 
+def _probe_subcommand(binary: str, *subcmd: str) -> bool | str:
+    """Check whether ``container <subcmd> --help`` exits successfully.
+
+    Returns True when the subcommand is available (``--help`` exits 0),
+    False when it is not, and ``"untested"`` when the probe itself failed.
+    """
+    try:
+        r = subprocess.run(
+            [binary, *subcmd, "--help"],
+            capture_output=True, text=True, timeout=10,
+        )
+        return r.returncode == 0
+    except Exception:
+        return "untested"
+
+
 def _probe_network_subcommand(m: CapabilityManifest) -> bool | str:
+    """Check the ``network`` subcommand and confirm it offers ``create``."""
     try:
         r = subprocess.run(
             [m.container_binary, "network", "--help"],
