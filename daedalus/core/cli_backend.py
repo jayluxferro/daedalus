@@ -30,6 +30,9 @@ from daedalus.core.backend import (
     ContainerInfo,
     ContainerState,
     ExecResult,
+    MachineCreateSpec,
+    MachineInfo,
+    MachineSetSettings,
     NetworkInfo,
     NetworkSpec,
     PruneResult,
@@ -243,6 +246,81 @@ class OutputParser:
         item.setdefault("name", ref)
         item.setdefault("descriptor", cfg.get("descriptor", {}))
         return item
+
+    # -- machines (container 1.2.2) --------------------------------------
+
+    @staticmethod
+    def machine_id(text: str) -> str:
+        """Parse the echoed machine id from ``machine create`` output.
+
+        The CLI prints the machine id on stdout (and nothing else).
+        """
+        lines = OutputParser.lines(text)
+        return lines[0] if lines else ""
+
+    @staticmethod
+    def machine_list(text: str) -> list[MachineInfo]:
+        """Parse ``machine list --format json`` output (SPEC §2.1).
+
+        ``memory`` and ``diskSize`` are **bytes** on the wire.
+        """
+        data = OutputParser.json(text)
+        items: list[dict[str, Any]] = []
+        if isinstance(data, list):
+            items = [item for item in data if isinstance(item, dict)]
+        elif isinstance(data, dict) and data:
+            items = [data]
+        return [OutputParser._machine_info_from(item) for item in items]
+
+    @staticmethod
+    def _machine_info_from(item: dict[str, Any]) -> MachineInfo:
+        """Map the common fields of one machine list/inspect element."""
+        return MachineInfo(
+            id=str(item.get("id", "") or ""),
+            status=str(item.get("status", "") or ""),
+            cpus=int(item.get("cpus", 0) or 0),
+            memory_bytes=int(item.get("memory", 0) or 0),
+            disk_size_bytes=int(item.get("diskSize", 0) or 0),
+            default=bool(item.get("default", False)),
+            created_date=str(item.get("createdDate", "") or ""),
+            raw=item,
+        )
+
+    @staticmethod
+    def machine_inspect(text: str) -> MachineInfo:
+        """Parse ``machine inspect <id>`` output (SPEC §2.1).
+
+        Inspect prints a JSON array directly (no ``--format`` flag); the
+        first element describes the requested machine.  The richer
+        inspect-only fields (homeMount, image.reference, platform.*,
+        userSetup.*) are merged over the shared list fields.
+        """
+        data = OutputParser.json(text)
+        item: dict[str, Any] = {}
+        if isinstance(data, list) and data:
+            first = data[0]
+            if isinstance(first, dict):
+                item = first
+        elif isinstance(data, dict):
+            item = data
+        info = OutputParser._machine_info_from(item)
+        image = item.get("image", {})
+        if not isinstance(image, dict):
+            image = {}
+        platform = item.get("platform", {})
+        if not isinstance(platform, dict):
+            platform = {}
+        user = item.get("userSetup", {})
+        if not isinstance(user, dict):
+            user = {}
+        info.home_mount = str(item.get("homeMount", "") or "")
+        info.image_ref = str(image.get("reference", "") or "")
+        info.platform_arch = str(platform.get("architecture", "") or "")
+        info.platform_os = str(platform.get("os", "") or "")
+        info.user_username = str(user.get("username", "") or "")
+        info.user_uid = int(user.get("uid", 0) or 0)
+        info.user_gid = int(user.get("gid", 0) or 0)
+        return info
 
 
 # ==========================================================================
@@ -557,6 +635,92 @@ class CliBackend(Backend):
     async def network_delete(self, name: str) -> None:
         self._require("custom_networks")
         await _run_cli_impl("network", "delete", name, binary=self._binary)
+
+    # ==================================================================
+    # Machines (container 1.2.2)
+    # ==================================================================
+
+    async def machine_create(self, spec: MachineCreateSpec) -> MachineInfo:
+        self._require("container_machines")
+        _, out, _ = await _run_cli_impl(
+            "machine", "create", *spec.to_cli_args(), binary=self._binary,
+        )
+        mid = OutputParser.machine_id(out)
+        if not mid:
+            return MachineInfo(id="")
+        # Create echoes only the id — resolve the full info via inspect.
+        return await self.machine_inspect(mid)
+
+    async def machine_list(self) -> list[MachineInfo]:
+        self._require("container_machines")
+        _, out, _ = await _run_cli_impl(
+            "machine", "list", "--format", "json", binary=self._binary,
+        )
+        return OutputParser.machine_list(out)
+
+    async def machine_inspect(self, machine_id: str) -> MachineInfo:
+        self._require("container_machines")
+        # NOTE: no --format flag — machine inspect emits a JSON array.
+        _, out, _ = await _run_cli_impl(
+            "machine", "inspect", machine_id, binary=self._binary,
+        )
+        return OutputParser.machine_inspect(out)
+
+    async def machine_delete(self, machine_id: str) -> None:
+        self._require("container_machines")
+        await _run_cli_impl("machine", "delete", machine_id, binary=self._binary)
+
+    async def machine_stop(self, machine_id: str) -> None:
+        self._require("container_machines")
+        await _run_cli_impl("machine", "stop", machine_id, binary=self._binary)
+
+    async def machine_set(
+        self, machine_id: str, settings: MachineSetSettings,
+    ) -> None:
+        self._require("container_machines")
+        await _run_cli_impl(
+            "machine", "set", "-n", machine_id, *settings.to_set_args(),
+            binary=self._binary,
+        )
+
+    async def machine_set_default(self, machine_id: str) -> None:
+        self._require("container_machines")
+        await _run_cli_impl(
+            "machine", "set-default", machine_id, binary=self._binary,
+        )
+
+    async def machine_run(
+        self,
+        machine_id: str,
+        argv: list[str],
+        *,
+        env: dict[str, str] | None = None,
+        gid: int | None = None,
+        interactive: bool = False,
+        timeout: float = 60.0,
+    ) -> ExecResult:
+        self._require("container_machines")
+        cmd = ["machine", "run", "-n", machine_id]
+        if env:
+            for k, v in env.items():
+                cmd += ["-e", f"{k}={v}"]
+        if gid is not None:
+            cmd += ["--gid", str(gid)]
+        if interactive:
+            cmd.append("-i")
+        cmd += argv
+        # check=False — run captures the command's exit code, not the CLI's.
+        exit_code, out, err = await _run_cli_impl(
+            *cmd, binary=self._binary, check=False, timeout=timeout,
+        )
+        return ExecResult(exit_code=exit_code, stdout=out, stderr=err)
+
+    async def machine_logs(self, machine_id: str) -> str:
+        self._require("container_machines")
+        _, out, _ = await _run_cli_impl(
+            "machine", "logs", machine_id, binary=self._binary,
+        )
+        return out
 
     # ==================================================================
     # Interaction

@@ -13,21 +13,29 @@ engine verb and follows these safety rules:
 from __future__ import annotations
 
 import json
+import shlex
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Any
 
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import ToolAnnotations
 
 from daedalus.core.audit import ActorKind, AuditLog
-from daedalus.core.backend import NetworkInfo, NetworkSpec
+from daedalus.core.backend import (
+    MachineCreateSpec,
+    MachineInfo,
+    MachineSetSettings,
+    NetworkInfo,
+    NetworkSpec,
+)
 from daedalus.core.capabilities import ensure_daemon, probe
 from daedalus.core.cli_backend import CliBackend
 from daedalus.core.exceptions import DaedalusError, ValidationError
 from daedalus.core.forge import Forge
 from daedalus.core.icarus import ExecOptions, Icarus
+from daedalus.core.machina import Machina
 from daedalus.core.mint import Mint
 from daedalus.core.policy import PolicyEngine, PolicyResult, load_policy_config
 from daedalus.core.profiles import ProfileRegistry
@@ -47,6 +55,7 @@ class DaedalusContext:
     backend: CliBackend
     forge: Forge
     icarus: Icarus
+    machina: Machina
     mint: Mint
     talos: Talos
     profiles: ProfileRegistry
@@ -84,6 +93,7 @@ async def daedalus_lifespan(server: FastMCP) -> AsyncIterator[DaedalusContext]:
         backend=backend,
         forge=Forge(backend, caps, policy=policy, audit=audit, store=store),
         icarus=Icarus(backend, audit=audit, store=store, runtime_binary=caps.container_binary),
+        machina=Machina(backend, caps, policy=policy, audit=audit),
         mint=Mint(backend, audit=audit),
         talos=Talos(backend, caps, policy=policy, audit=audit),
         profiles=ProfileRegistry(),
@@ -146,6 +156,27 @@ def _network_dict(n: NetworkInfo) -> dict[str, Any]:
     }
 
 
+def _machine_dict(info: MachineInfo) -> dict[str, Any]:
+    """Serialise a ``MachineInfo`` as a flat dict (SPEC §2.1)."""
+    return {
+        "id": info.id,
+        "status": info.status,
+        "cpus": info.cpus,
+        "memory_bytes": info.memory_bytes,
+        "disk_size_bytes": info.disk_size_bytes,
+        "default": info.default,
+        "created_date": info.created_date,
+        "home_mount": info.home_mount,
+        "image_ref": info.image_ref,
+        "platform_arch": info.platform_arch,
+        "platform_os": info.platform_os,
+        "user_username": info.user_username,
+        "user_uid": info.user_uid,
+        "user_gid": info.user_gid,
+        "warning": info.warning,
+    }
+
+
 # ==========================================================================
 # Server
 # ==========================================================================
@@ -164,11 +195,13 @@ Core capabilities:
 - Copy files and export filesystems via `daedalus_copy` / `daedalus_export`
 - Manage container networks via `daedalus_network_*`
 - Control system DNS via `daedalus_dns_*`
+- Manage persistent container machines via `daedalus_machine_*`
 
 Safety rules:
 1. ALWAYS call `daedalus_health` first to check what the host supports
 2. Destructive operations (`daedalus_destroy`, `daedalus_prune`,
-   `daedalus_dns_delete`, `daedalus_network_delete`)
+   `daedalus_dns_delete`, `daedalus_network_delete`,
+   `daedalus_machine_delete`)
    require `confirm=True` and are logged in the audit trail
 3. The default `detonation` profile applies maximum isolation
 4. Kernel overrides require `confirm_kernel=True` on `daedalus_run`
@@ -1561,6 +1594,285 @@ async def daedalus_network_delete(
         await dc.talos.network_delete(name, confirm=True)
         _audit_agent(dc, "network_delete", {"name": name, "confirm": confirm})
         return _ok({"name": name, "deleted": True})
+    except DaedalusError as e:
+        return _err(e)
+
+
+# ==========================================================================
+# Machines (container 1.2.2 — persistent stateful VMs)
+# ==========================================================================
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="List container machines",
+        readOnlyHint=True,
+        idempotentHint=True,
+    ),
+)
+async def daedalus_machine_list(ctx: Context | None = None) -> str:
+    """List persistent container machines.
+
+    Returns a JSON array of {id, status, cpus, memory_bytes,
+    disk_size_bytes, default, created_date, home_mount, image_ref,
+    platform_arch, platform_os, user_username, user_uid, user_gid,
+    warning} objects.
+    """
+    dc = _get_ctx(ctx)
+    try:
+        machines = await dc.machina.list()
+        return json.dumps([_machine_dict(m) for m in machines])
+    except DaedalusError as e:
+        return _err(e)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Create a persistent container machine",
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=True,
+    ),
+)
+async def daedalus_machine_create(
+    image: str,
+    name: str | None = None,
+    cpus: int | None = None,
+    memory: str | None = None,
+    home_mount: str | None = None,
+    virtualization: bool = False,
+    kernel: str | None = None,
+    set_default: bool = False,
+    no_boot: bool = False,
+    ctx: Context | None = None,
+) -> str:
+    """Create a persistent container machine (without booting it).
+
+    **Init requirement**: machines boot the image's own /sbin/init as
+    PID 1, so images without an init system (alpine, ubuntu, debian,
+    node, ...) cannot boot.  A non-empty ``warning`` field in the result
+    flags likely-initless images — prefer an init-capable image (or pass
+    no_boot=True and prepare the image before booting).
+
+    Example:
+        daedalus_machine_create(image="my-systemd-image:latest", no_boot=True)
+    """
+    dc = _get_ctx(ctx)
+    try:
+        spec = MachineCreateSpec(
+            image=image, name=name, cpus=cpus, memory=memory,
+            home_mount=home_mount, virtualization=virtualization,
+            kernel=kernel, set_default=set_default, no_boot=no_boot,
+        )
+        info = await dc.machina.create(spec)
+        _audit_agent(dc, "machine_create", {
+            "image": image, "name": name, "cpus": cpus, "memory": memory,
+            "home_mount": home_mount, "virtualization": virtualization,
+            "kernel": kernel, "set_default": set_default, "no_boot": no_boot,
+        }, _machine_dict(info))
+        return _ok(_machine_dict(info))
+    except DaedalusError as e:
+        return _err(e)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Inspect a container machine",
+        readOnlyHint=True,
+        idempotentHint=True,
+    ),
+)
+async def daedalus_machine_inspect(
+    machine_id: str, ctx: Context | None = None,
+) -> str:
+    """Inspect a single container machine.
+
+    Returns the same flat fields as daedalus_machine_list plus
+    inspect-only fields (home_mount, image_ref, platform, user mapping).
+    """
+    dc = _get_ctx(ctx)
+    try:
+        info = await dc.machina.inspect(machine_id)
+        return _ok(_machine_dict(info))
+    except DaedalusError as e:
+        return _err(e)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Update a container machine's settings",
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=True,
+    ),
+)
+async def daedalus_machine_set(
+    machine_id: str,
+    cpus: int | None = None,
+    memory: str | None = None,
+    home_mount: str | None = None,
+    virtualization: bool | None = None,
+    kernel: str | None = None,
+    ctx: Context | None = None,
+) -> str:
+    """Update a container machine's settings.
+
+    Only the provided settings are changed (cpus, memory, home_mount,
+    virtualization, kernel) and they apply after the machine restarts.
+    Pass kernel="" to reset the kernel to the runtime default.  Returns
+    {updated: [...]} listing the applied setting keys.
+    """
+    dc = _get_ctx(ctx)
+    try:
+        settings = MachineSetSettings(
+            cpus=cpus, memory=memory, home_mount=home_mount,
+            virtualization=virtualization, kernel=kernel,
+        )
+        applied = {k: v for k, v in asdict(settings).items() if v is not None}
+        await dc.machina.set(machine_id, settings)
+        _audit_agent(dc, "machine_set", {"machine_id": machine_id, **applied})
+        return _ok({"updated": list(applied.keys())})
+    except DaedalusError as e:
+        return _err(e)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Set the default container machine",
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=True,
+    ),
+)
+async def daedalus_machine_set_default(
+    machine_id: str, ctx: Context | None = None,
+) -> str:
+    """Make a container machine the default (used when no id is given)."""
+    dc = _get_ctx(ctx)
+    try:
+        await dc.machina.set_default(machine_id)
+        _audit_agent(dc, "machine_set_default", {"machine_id": machine_id})
+        return _ok({"machine_id": machine_id, "default": True})
+    except DaedalusError as e:
+        return _err(e)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Stop a container machine",
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=True,
+    ),
+)
+async def daedalus_machine_stop(
+    machine_id: str, ctx: Context | None = None,
+) -> str:
+    """Stop a container machine."""
+    dc = _get_ctx(ctx)
+    try:
+        await dc.machina.stop(machine_id)
+        _audit_agent(dc, "machine_stop", {"machine_id": machine_id})
+        return _ok({"machine_id": machine_id, "stopped": True})
+    except DaedalusError as e:
+        return _err(e)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Delete a container machine permanently",
+        readOnlyHint=False,
+        destructiveHint=True,
+        idempotentHint=False,
+    ),
+)
+async def daedalus_machine_delete(
+    machine_id: str,
+    confirm: bool = False,
+    ctx: Context | None = None,
+) -> str:
+    """Delete a container machine. Requires confirm=True.
+
+    **WARNING**: Destructive operation. Must pass confirm=True.
+    The machine's disk is unrecoverable after deletion.
+    """
+    if not confirm:
+        raise ValueError(json.dumps({
+            "error": "confirm=True required for machine deletion",
+            "code": "CONFIRM_REQUIRED",
+        }))
+    dc = _get_ctx(ctx)
+    try:
+        await dc.machina.delete(machine_id, confirm=True)
+        _audit_agent(dc, "machine_delete", {
+            "machine_id": machine_id, "confirm": confirm,
+        })
+        return _ok({"machine_id": machine_id, "deleted": True})
+    except DaedalusError as e:
+        return _err(e)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Run a command inside a container machine",
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+    ),
+)
+async def daedalus_machine_run(
+    machine_id: str,
+    command: str,
+    ctx: Context | None = None,
+) -> str:
+    """Run a command inside a container machine (boots it if necessary).
+
+    The command string is split into argv with shlex.  Returns
+    {exit_code, stdout, stderr} as JSON.  When the machine fails to boot
+    (non-zero exit code), an ``explanation`` field describes the likely
+    cause (e.g. the image has no init system).
+    """
+    dc = _get_ctx(ctx)
+    try:
+        argv = shlex.split(command)
+        if not argv:
+            return _err(ValidationError("command required"))
+        result = await dc.machina.run(machine_id, argv)
+        _audit_agent(dc, "machine_run", {
+            "machine_id": machine_id, "argv": argv,
+        })
+        payload: dict[str, object] = {
+            "exit_code": result.exit_code,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+        }
+        if result.exit_code != 0:
+            try:
+                explanation = await dc.machina.explain_failure(machine_id)
+            except DaedalusError:
+                explanation = None
+            if explanation is not None:
+                payload["explanation"] = explanation
+        return _ok(payload)
+    except DaedalusError as e:
+        return _err(e)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Read container machine logs",
+        readOnlyHint=True,
+        idempotentHint=True,
+    ),
+)
+async def daedalus_machine_logs(
+    machine_id: str, ctx: Context | None = None,
+) -> str:
+    """Retrieve a container machine's boot/stdout logs as raw text."""
+    dc = _get_ctx(ctx)
+    try:
+        return await dc.machina.logs(machine_id)
     except DaedalusError as e:
         return _err(e)
 

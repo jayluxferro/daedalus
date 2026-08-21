@@ -10,12 +10,14 @@ import TopologyView from './views/Topology'
 import DnsView from './views/Dns'
 import TerminalView from './views/Terminal'
 import NetworksView from './views/Networks'
+import MachinesView from './views/Machines'
 
-type Page = 'dashboard' | 'containers' | 'terminal' | 'images' | 'logs' | 'audit' | 'profiles' | 'experiments' | 'topology' | 'dns' | 'networks'
+type Page = 'dashboard' | 'containers' | 'machines' | 'terminal' | 'images' | 'logs' | 'audit' | 'profiles' | 'experiments' | 'topology' | 'dns' | 'networks'
 
 const NAV: { id: Page; label: string }[] = [
   { id: 'dashboard', label: 'Dashboard' },
   { id: 'containers', label: 'Containers' },
+  { id: 'machines', label: 'Machines' },
   { id: 'terminal', label: 'Terminal' },
   { id: 'images', label: 'Images' },
   { id: 'logs', label: 'Logs' },
@@ -65,6 +67,7 @@ export default function App() {
       <main style={{ flex: 1, overflow: 'auto', padding: 24 }}>
         {page === 'dashboard' && <Dashboard />}
         {page === 'containers' && <ContainersView onOpenTerminal={id => { setTerminalId(id); setPage('terminal') }} />}
+        {page === 'machines' && <MachinesView />}
         {page === 'terminal' && terminalId && <TerminalView containerId={terminalId} onClose={() => setPage('containers')} />}
         {page === 'images' && <ImagesView />}
         {page === 'logs' && <LogsView />}

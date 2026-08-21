@@ -34,6 +34,17 @@ Endpoints::
     GET  /images/{name}
     DELETE /images/{name}
 
+    # Machines
+    GET  /machines
+    POST /machines
+    GET  /machines/{machine_id}
+    POST /machines/{machine_id}/set
+    POST /machines/{machine_id}/set-default
+    POST /machines/{machine_id}/stop
+    DELETE /machines/{machine_id}
+    POST /machines/{machine_id}/run
+    GET  /machines/{machine_id}/logs
+
     # Profiles
     GET  /profiles
 
@@ -63,12 +74,18 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from daedalus.core.audit import ActorKind, AuditLog
-from daedalus.core.backend import BuildSpec, NetworkSpec
+from daedalus.core.backend import (
+    BuildSpec,
+    MachineCreateSpec,
+    MachineSetSettings,
+    NetworkSpec,
+)
 from daedalus.core.capabilities import ensure_daemon, probe
 from daedalus.core.cli_backend import CliBackend
 from daedalus.core.exceptions import DaedalusError
 from daedalus.core.forge import Forge
 from daedalus.core.icarus import ExecOptions, Icarus
+from daedalus.core.machina import Machina
 from daedalus.core.mint import Mint
 from daedalus.core.policy import PolicyEngine, PolicyResult, load_policy_config
 from daedalus.core.profiles import ProfileRegistry
@@ -130,6 +147,30 @@ class SystemKernelSetRequest(BaseModel):
     recommended: bool = False
 
 
+class MachineCreateRequest(BaseModel):
+    image: str
+    name: str | None = None
+    cpus: int | None = None
+    memory: str | None = None
+    home_mount: str | None = None
+    virtualization: bool = False
+    kernel: str | None = None
+    set_default: bool = False
+    no_boot: bool = False
+
+
+class MachineSetRequest(BaseModel):
+    cpus: int | None = None
+    memory: str | None = None
+    home_mount: str | None = None
+    virtualization: bool | None = None
+    kernel: str | None = None
+
+
+class MachineRunRequest(BaseModel):
+    command: list[str]
+
+
 def _container_dict(lab: Any) -> dict[str, Any]:
     return {
         "id": lab.id,
@@ -152,6 +193,14 @@ def _network_dict(net: Any) -> dict[str, Any]:
         "subnet_v6": net.subnet_v6,
         "gateway": net.gateway,
     }
+
+
+def _machine_dict(info: Any) -> dict[str, Any]:
+    """Serialise a machine (``MachineInfo``) as a flat dict.
+
+    ``to_dict()`` includes the engine-set advisor ``warning`` field.
+    """
+    return info.to_dict()
 
 
 class ExecRequest(BaseModel):
@@ -244,6 +293,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         "icarus": Icarus(backend, audit=audit, store=store, runtime_binary=caps.container_binary),
         "mint": Mint(backend, audit=audit),
         "talos": Talos(backend, caps, policy=policy, audit=audit),
+        "machina": Machina(backend, caps, policy=policy, audit=audit),
         "profiles": ProfileRegistry(),
         "audit": audit,
         "store": store,
@@ -531,6 +581,115 @@ async def container_report(container_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="report not found")
     with open(path) as f:
         return json.load(f)
+
+
+# ==========================================================================
+# Machines (container 1.2.2 persistent VMs)
+# ==========================================================================
+
+
+@app.get("/machines")
+async def machine_list() -> list[dict[str, Any]]:
+    """List persistent container machines."""
+    s = _get_state()
+    machines = await s["machina"].list()
+    return [_machine_dict(m) for m in machines]
+
+
+@app.post("/machines")
+async def machine_create(req: MachineCreateRequest) -> dict[str, Any]:
+    """Create a persistent machine (advisor warning echoed when flagged)."""
+    s = _get_state()
+    spec = MachineCreateSpec(
+        image=req.image,
+        name=req.name,
+        cpus=req.cpus,
+        memory=req.memory,
+        home_mount=req.home_mount,
+        virtualization=req.virtualization,
+        kernel=req.kernel,
+        set_default=req.set_default,
+        no_boot=req.no_boot,
+    )
+    info = await s["machina"].create(spec)
+    return _machine_dict(info)
+
+
+@app.get("/machines/{machine_id}")
+async def machine_inspect(machine_id: str) -> dict[str, Any]:
+    """Inspect a single machine."""
+    s = _get_state()
+    info = await s["machina"].inspect(machine_id)
+    return _machine_dict(info)
+
+
+@app.post("/machines/{machine_id}/set")
+async def machine_set(machine_id: str, req: MachineSetRequest) -> dict[str, Any]:
+    """Update machine settings (changes apply after restart)."""
+    s = _get_state()
+    settings = MachineSetSettings(
+        cpus=req.cpus,
+        memory=req.memory,
+        home_mount=req.home_mount,
+        virtualization=req.virtualization,
+        kernel=req.kernel,
+    )
+    await s["machina"].set(machine_id, settings)
+    return {"ok": True}
+
+
+@app.post("/machines/{machine_id}/set-default")
+async def machine_set_default(machine_id: str) -> dict[str, Any]:
+    """Make a machine the default (used when no id is given)."""
+    s = _get_state()
+    await s["machina"].set_default(machine_id)
+    return {"ok": True}
+
+
+@app.post("/machines/{machine_id}/stop")
+async def machine_stop(machine_id: str) -> dict[str, Any]:
+    """Stop a machine."""
+    s = _get_state()
+    await s["machina"].stop(machine_id)
+    return {"ok": True}
+
+
+@app.delete("/machines/{machine_id}")
+async def machine_delete(
+    machine_id: str,
+    confirm: bool = Query(False),
+) -> dict[str, Any]:
+    """Delete a machine (destructive — confirm required)."""
+    if not confirm:
+        raise HTTPException(status_code=400, detail="confirm=true required for deletion")
+    s = _get_state()
+    await s["machina"].delete(machine_id, confirm=True)
+    return {"ok": True}
+
+
+@app.post("/machines/{machine_id}/run")
+async def machine_run(machine_id: str, req: MachineRunRequest) -> dict[str, Any]:
+    """Boot the machine if necessary and run a command inside it."""
+    s = _get_state()
+    result = await s["machina"].run(machine_id, req.command)
+    payload: dict[str, Any] = {
+        "exit_code": result.exit_code,
+        "stdout": result.stdout,
+        "stderr": result.stderr,
+    }
+    if result.exit_code != 0:
+        explanation = await s["machina"].explain_failure(machine_id)
+        if explanation is not None:
+            payload["explanation"] = explanation
+    return payload
+
+
+@app.get("/machines/{machine_id}/logs")
+async def machine_logs(machine_id: str) -> dict[str, str]:
+    """Dump a machine's boot/stdout logs."""
+    s = _get_state()
+    logs = await s["machina"].logs(machine_id)
+    return {"logs": logs}
 
 
 # ==========================================================================

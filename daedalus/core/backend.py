@@ -424,6 +424,136 @@ class PruneResult:
     message: str = ""                # "Reclaimed 282.1 MB in disk space"
 
 
+@dataclass
+class MachineInfo:
+    """Parsed ``machine list`` / ``machine inspect`` result (SPEC §2.1).
+
+    ``memory_bytes`` and ``disk_size_bytes`` are **bytes** (the wire
+    emits raw byte counts).  ``warning`` is engine-set (the machina
+    init-capability advisor), never read off the wire.
+    """
+
+    id: str
+    status: str = ""                 # stopped | running | ...
+    cpus: int = 0
+    memory_bytes: int = 0
+    disk_size_bytes: int = 0
+    default: bool = False
+    created_date: str = ""
+    home_mount: str = ""             # inspect-only
+    image_ref: str = ""              # inspect-only
+    platform_arch: str = ""
+    platform_os: str = ""
+    user_username: str = ""
+    user_uid: int = 0
+    user_gid: int = 0
+    warning: str = ""                # advisor note (engine-set, not from wire)
+    raw: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialise the machine as a flat dict."""
+        return {
+            "id": self.id,
+            "status": self.status,
+            "cpus": self.cpus,
+            "memory_bytes": self.memory_bytes,
+            "disk_size_bytes": self.disk_size_bytes,
+            "default": self.default,
+            "created_date": self.created_date,
+            "home_mount": self.home_mount,
+            "image_ref": self.image_ref,
+            "platform_arch": self.platform_arch,
+            "platform_os": self.platform_os,
+            "user_username": self.user_username,
+            "user_uid": self.user_uid,
+            "user_gid": self.user_gid,
+            "warning": self.warning,
+        }
+
+
+@dataclass
+class MachineCreateSpec:
+    """Spec for ``container machine create`` (container 1.2.2).
+
+    The image is emitted **last** — the CLI syntax is
+    ``machine create [opts] <image>``.
+    """
+
+    image: str
+    name: str | None = None
+    cpus: int | None = None
+    memory: str | None = None        # "2G" | "8G" — CLI string form
+    home_mount: str | None = None    # ro | rw | none
+    virtualization: bool = False
+    kernel: str | None = None
+    set_default: bool = False
+    no_boot: bool = False
+    arch: str | None = None
+    os: str | None = None
+    platform: str | None = None
+    scheme: str | None = None
+
+    def to_cli_args(self) -> list[str]:
+        """Serialize into ``container machine create`` CLI arguments."""
+        flags: list[str] = []
+        if self.name:
+            flags += ["--name", self.name]
+        if self.set_default:
+            flags.append("--set-default")
+        if self.no_boot:
+            flags.append("--no-boot")
+        if self.cpus is not None:
+            flags += ["--cpus", str(self.cpus)]
+        if self.memory:
+            flags += ["--memory", self.memory]
+        if self.home_mount:
+            flags += ["--home-mount", self.home_mount]
+        if self.virtualization:
+            flags.append("--virtualization")
+        if self.kernel:
+            flags += ["--kernel", self.kernel]
+        if self.arch:
+            flags += ["--arch", self.arch]
+        if self.os:
+            flags += ["--os", self.os]
+        if self.platform:
+            flags += ["--platform", self.platform]
+        if self.scheme:
+            flags += ["--scheme", self.scheme]
+        flags.append(self.image)
+        return flags
+
+
+@dataclass
+class MachineSetSettings:
+    """Settings for ``container machine set`` (SPEC §2.1).
+
+    ``kernel=""`` is meaningful — an empty string resets the kernel
+    (emitted as a bare ``kernel=`` arg).
+    """
+
+    cpus: int | None = None
+    memory: str | None = None
+    home_mount: str | None = None
+    virtualization: bool | None = None
+    kernel: str | None = None
+
+    def to_set_args(self) -> list[str]:
+        """Serialize only non-None fields as ``key=value`` args."""
+        args: list[str] = []
+        if self.cpus is not None:
+            args.append(f"cpus={self.cpus}")
+        if self.memory is not None:
+            args.append(f"memory={self.memory}")
+        if self.home_mount is not None:
+            args.append(f"home-mount={self.home_mount}")
+        if self.virtualization is not None:
+            args.append(f"virtualization={'true' if self.virtualization else 'false'}")
+        if self.kernel is not None:
+            args.append(f"kernel={self.kernel}")
+        return args
+
+
 # ==========================================================================
 # Abstract backend
 # ==========================================================================
@@ -752,6 +882,64 @@ class Backend(ABC):
     @abstractmethod
     async def network_delete(self, name: str) -> None:
         """Delete a network."""
+        ...
+
+    # -- machines (container 1.2.2) ----------------------------------------
+
+    @abstractmethod
+    async def machine_create(self, spec: MachineCreateSpec) -> MachineInfo:
+        """Create a persistent machine (does not boot it when ``no_boot``)."""
+        ...
+
+    @abstractmethod
+    async def machine_list(self) -> list[MachineInfo]:
+        """List machines.  Supports ``--format json``."""
+        ...
+
+    @abstractmethod
+    async def machine_inspect(self, machine_id: str) -> MachineInfo:
+        """Inspect a single machine (JSON array on the wire)."""
+        ...
+
+    @abstractmethod
+    async def machine_delete(self, machine_id: str) -> None:
+        """Delete a machine (destructive)."""
+        ...
+
+    @abstractmethod
+    async def machine_stop(self, machine_id: str) -> None:
+        """Stop a machine."""
+        ...
+
+    @abstractmethod
+    async def machine_set(
+        self, machine_id: str, settings: MachineSetSettings,
+    ) -> None:
+        """Update machine settings (``cpus=``, ``memory=``, ...)."""
+        ...
+
+    @abstractmethod
+    async def machine_set_default(self, machine_id: str) -> None:
+        """Make a machine the default (used when no id is given)."""
+        ...
+
+    @abstractmethod
+    async def machine_run(
+        self,
+        machine_id: str,
+        argv: list[str],
+        *,
+        env: dict[str, str] | None = None,
+        gid: int | None = None,
+        interactive: bool = False,
+        timeout: float = 60.0,
+    ) -> ExecResult:
+        """Boot a machine if necessary and run a command inside it."""
+        ...
+
+    @abstractmethod
+    async def machine_logs(self, machine_id: str) -> str:
+        """Dump a machine's boot/stdout logs as plain text."""
         ...
 
     # -- escape hatch ------------------------------------------------------

@@ -106,6 +106,12 @@ class TestCapabilityProbe:
         assert m.export is True
         assert m.prune is True
         assert m.network_subcommand is True
+        assert m.machine is True
+
+    def test_probe_machine_gate(self):
+        m = probe()
+        assert m.machine is True
+        assert m.runtime_features["container_machines"] is True
 
     def test_probe_new_runtime_features(self):
         m = probe()
@@ -115,6 +121,7 @@ class TestCapabilityProbe:
         assert rf["container_export"] is True
         assert rf["container_prune"] is True
         assert rf["custom_networks"] is True
+        assert rf["container_machines"] is True
 
     def test_subcommands_reference_has_new_verbs(self):
         new_verbs = {
@@ -173,7 +180,7 @@ class TestCapabilityManifestUnit:
         )
 
     @pytest.mark.parametrize("gate", [
-        "stats", "copy", "export", "prune", "network_subcommand",
+        "stats", "copy", "export", "prune", "network_subcommand", "machine",
     ])
     def test_new_verb_gates_default_untested(self, gate):
         m = CapabilityManifest()
@@ -186,6 +193,7 @@ class TestCapabilityManifestUnit:
             export=True,
             prune=True,
             network_subcommand=True,
+            machine=True,
         )
         rf = _runtime_features(m)
         assert rf["container_stats"] is True
@@ -193,6 +201,7 @@ class TestCapabilityManifestUnit:
         assert rf["container_export"] is True
         assert rf["container_prune"] is True
         assert rf["custom_networks"] is True
+        assert rf["container_machines"] is True
 
         m = CapabilityManifest()
         rf = _runtime_features(m)
@@ -201,6 +210,7 @@ class TestCapabilityManifestUnit:
         assert rf["container_export"] is False
         assert rf["container_prune"] is False
         assert rf["custom_networks"] is False
+        assert rf["container_machines"] is False
 
     def test_as_dict_includes_new_fields(self):
         m = CapabilityManifest(
@@ -209,6 +219,7 @@ class TestCapabilityManifestUnit:
             export="untested",
             prune=True,
             network_subcommand=True,
+            machine=True,
         )
         d = m.as_dict()
         assert d["stats"] is True
@@ -216,6 +227,7 @@ class TestCapabilityManifestUnit:
         assert d["export"] == "untested"
         assert d["prune"] is True
         assert d["network_subcommand"] is True
+        assert d["machine"] is True
 
     def test_summary_includes_new_gates(self):
         m = CapabilityManifest(
@@ -224,6 +236,7 @@ class TestCapabilityManifestUnit:
             export="untested",
             prune=True,
             network_subcommand=True,
+            machine=True,
         )
         summary = m.summary()
         assert "stats:        ✓ yes" in summary
@@ -231,6 +244,7 @@ class TestCapabilityManifestUnit:
         assert "export:       ? untested" in summary
         assert "prune:        ✓ yes" in summary
         assert "net-subcmd:   ✓ yes" in summary
+        assert "machine:      ✓ yes" in summary
 
     def test_probe_subcommand_helper(self):
         assert _probe_subcommand("/usr/bin/true") is True

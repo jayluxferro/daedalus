@@ -14,12 +14,18 @@ from rich.console import Console
 from rich.table import Table
 
 from daedalus.core.audit import ActorKind, AuditLog
-from daedalus.core.backend import NetworkInfo, NetworkSpec
+from daedalus.core.backend import (
+    MachineCreateSpec,
+    MachineSetSettings,
+    NetworkInfo,
+    NetworkSpec,
+)
 from daedalus.core.capabilities import CapabilityManifest, ensure_daemon, probe
 from daedalus.core.cli_backend import CliBackend
 from daedalus.core.exceptions import ValidationError
 from daedalus.core.forge import Forge
 from daedalus.core.icarus import ExecOptions, Icarus
+from daedalus.core.machina import Machina
 from daedalus.core.mint import Mint
 from daedalus.core.policy import PolicyEngine, PolicyResult, load_policy_config
 from daedalus.core.profiles import ProfileRegistry
@@ -39,6 +45,7 @@ _caps: CapabilityManifest | None = None
 _backend: CliBackend | None = None
 _forge: Forge | None = None
 _icarus: Icarus | None = None
+_machina: Machina | None = None
 _mint: Mint | None = None
 _profiles: ProfileRegistry | None = None
 _store: Store | None = None
@@ -46,7 +53,7 @@ _talos: Talos | None = None
 
 
 def _bootstrap() -> None:
-    global _caps, _backend, _forge, _icarus, _mint, _profiles, _store, _talos
+    global _caps, _backend, _forge, _icarus, _machina, _mint, _profiles, _store, _talos
     if _caps is not None:
         return
     ensure_daemon()
@@ -76,6 +83,7 @@ def _bootstrap() -> None:
     )
     _talos = Talos(backend, _caps, policy=policy, audit=audit)
     _mint = Mint(backend, audit=audit)
+    _machina = Machina(backend, _caps, policy=policy, audit=audit)
     _profiles = ProfileRegistry()
 
 
@@ -97,6 +105,11 @@ def _i() -> Icarus:
 def _m() -> Mint:
     assert _mint is not None
     return _mint
+
+
+def _mc() -> Machina:
+    assert _machina is not None
+    return _machina
 
 
 def _p() -> ProfileRegistry:
@@ -660,6 +673,201 @@ def network_delete(
 
 
 # ==================================================================
+# Machines
+# ==================================================================
+
+
+machine_app = typer.Typer(
+    name="machine",
+    help="Manage container machines.",
+    no_args_is_help=True,
+)
+
+
+@machine_app.command("create")
+def machine_create(
+    image: str,
+    name: Annotated[str | None, typer.Option("--name", "-n")] = None,
+    cpus: Annotated[int | None, typer.Option("--cpus")] = None,
+    memory: Annotated[str | None, typer.Option("--memory")] = None,
+    home_mount: Annotated[str | None, typer.Option("--home-mount")] = None,
+    virtualization: Annotated[bool, typer.Option("--virtualization")] = False,
+    kernel: Annotated[str | None, typer.Option("--kernel")] = None,
+    set_default: Annotated[bool, typer.Option("--set-default")] = False,
+    no_boot: Annotated[bool, typer.Option("--no-boot")] = False,
+) -> None:
+    """Create a container machine (does not boot it with --no-boot)."""
+    _bootstrap()
+    spec = MachineCreateSpec(
+        image=image,
+        name=name,
+        cpus=cpus,
+        memory=memory,
+        home_mount=home_mount,
+        virtualization=virtualization,
+        kernel=kernel,
+        set_default=set_default,
+        no_boot=no_boot,
+    )
+
+    async def _go() -> None:
+        info = await _mc().create(spec)
+        console.print(f"[green]✓[/] Created machine [bold]{info.id}[/]")
+        if info.warning:
+            console.print(f"[yellow]warning:[/] {info.warning}")
+    asyncio.run(_go())
+
+
+@machine_app.command("list")
+def machine_list(
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """List container machines."""
+    _bootstrap()
+    async def _go() -> None:
+        machines = await _mc().list()
+        if json_output:
+            console.print(json.dumps([m.to_dict() for m in machines], indent=2))
+            return
+        if not machines:
+            console.print("[dim]No machines.[/]")
+            return
+        table = Table(title="Machines")
+        table.add_column("Name", style="cyan")
+        table.add_column("Status")
+        table.add_column("CPUs")
+        table.add_column("Memory")
+        table.add_column("Disk")
+        table.add_column("Default")
+        for m in machines:
+            status_style = "green" if m.status == "running" else "dim"
+            table.add_row(
+                m.id,
+                f"[{status_style}]{m.status}[/]",
+                str(m.cpus) if m.cpus else "-",
+                _fmt_size(m.memory_bytes) if m.memory_bytes else "-",
+                _fmt_size(m.disk_size_bytes) if m.disk_size_bytes else "-",
+                "✓" if m.default else "",
+            )
+        console.print(table)
+    asyncio.run(_go())
+
+
+@machine_app.command("inspect")
+def machine_inspect(
+    machine_id: str,
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Inspect a container machine."""
+    _bootstrap()
+    async def _go() -> None:
+        info = await _mc().inspect(machine_id)
+        if json_output:
+            console.print(json.dumps(info.to_dict(), indent=2))
+            return
+        console.print(f"Name:    {info.id}")
+        console.print(f"Status:  {info.status or '-'}")
+        console.print(f"Image:   {info.image_ref or '-'}")
+        console.print(f"CPUs:    {info.cpus if info.cpus else '-'}")
+        memory = _fmt_size(info.memory_bytes) if info.memory_bytes else "-"
+        console.print(f"Memory:  {memory}")
+        disk = _fmt_size(info.disk_size_bytes) if info.disk_size_bytes else "-"
+        console.print(f"Disk:    {disk}")
+        console.print(f"Home:    {info.home_mount or '-'}")
+        arch_os = f"{info.platform_arch}/{info.platform_os}"
+        console.print(f"Arch/OS: {arch_os if info.platform_arch else '-'}")
+        user = info.user_username or "-"
+        console.print(f"User:    {user} (uid {info.user_uid}, gid {info.user_gid})")
+        console.print(f"Created: {info.created_date or '-'}")
+        console.print(f"Default: {'✓' if info.default else '-'}")
+    asyncio.run(_go())
+
+
+@machine_app.command("set")
+def machine_set(
+    machine_id: str,
+    settings: Annotated[
+        list[str],
+        typer.Argument(help="key=value settings (repeatable)"),
+    ],
+) -> None:
+    """Update machine settings (cpus=, memory=, home-mount=, virtualization=, kernel=)."""
+    _bootstrap()
+    parsed = _parse_machine_settings(settings)
+
+    async def _go() -> None:
+        await _mc().set(machine_id, parsed)
+        console.print(f"[green]✓[/] Updated machine [bold]{machine_id}[/]")
+    asyncio.run(_go())
+
+
+@machine_app.command("set-default")
+def machine_set_default(machine_id: str) -> None:
+    """Make a machine the default (used when no id is given)."""
+    _bootstrap()
+    async def _go() -> None:
+        await _mc().set_default(machine_id)
+        console.print(f"[green]✓[/] [bold]{machine_id}[/] is now the default machine")
+    asyncio.run(_go())
+
+
+@machine_app.command("stop")
+def machine_stop(machine_id: str) -> None:
+    """Stop a container machine."""
+    _bootstrap()
+    async def _go() -> None:
+        await _mc().stop(machine_id)
+        console.print(f"[green]✓[/] Stopped machine [bold]{machine_id}[/]")
+    asyncio.run(_go())
+
+
+@machine_app.command("delete")
+def machine_delete(
+    machine_id: str,
+    confirm: Annotated[bool, typer.Option("--confirm")] = False,
+) -> None:
+    """Delete a container machine. Requires --confirm."""
+    _bootstrap()
+    async def _go() -> None:
+        if not confirm:
+            console.print("[yellow]requires --confirm[/]")
+            raise typer.Exit(code=1)
+        await _mc().delete(machine_id, confirm=True)
+        console.print(f"[red]✗[/] Deleted machine [bold]{machine_id}[/]")
+    asyncio.run(_go())
+
+
+@machine_app.command("run")
+def machine_run(
+    machine_id: str,
+    command: Annotated[list[str], typer.Argument(help="Command to run inside the machine")],
+) -> None:
+    """Boot a machine if necessary and run a command inside it."""
+    _bootstrap()
+    async def _go() -> None:
+        result = await _mc().run(machine_id, list(command), timeout=60.0)
+        if result.stdout:
+            console.print(result.stdout)
+        if result.stderr:
+            console.print(f"[red]{result.stderr}[/]")
+        if result.exit_code != 0:
+            explanation = await _mc().explain_failure(machine_id)
+            if explanation:
+                console.print(f"[yellow]{explanation}[/]")
+            raise typer.Exit(code=result.exit_code)
+    asyncio.run(_go())
+
+
+@machine_app.command("logs")
+def machine_logs(machine_id: str) -> None:
+    """Dump a machine's boot/stdout logs."""
+    _bootstrap()
+    async def _go() -> None:
+        console.print(await _mc().logs(machine_id))
+    asyncio.run(_go())
+
+
+# ==================================================================
 # Images
 # ==================================================================
 
@@ -1045,6 +1253,42 @@ def _fmt_size(b: int) -> str:
     return f"{b} B"
 
 
+def _parse_machine_settings(settings: list[str]) -> MachineSetSettings:
+    """Parse repeatable ``key=value`` strings into a settings object."""
+    out = MachineSetSettings()
+    for item in settings:
+        key, sep, value = item.partition("=")
+        if not sep:
+            raise typer.BadParameter(
+                f"invalid machine setting (expected key=value): {item}",
+            )
+        if key == "cpus":
+            try:
+                out.cpus = int(value)
+            except ValueError:
+                raise typer.BadParameter(
+                    f"machine setting cpus must be an integer: {value}",
+                ) from None
+        elif key == "memory":
+            out.memory = value
+        elif key == "home-mount":
+            out.home_mount = value
+        elif key == "virtualization":
+            if value == "true":
+                out.virtualization = True
+            elif value == "false":
+                out.virtualization = False
+            else:
+                raise typer.BadParameter(
+                    f"machine setting virtualization must be 'true' or 'false': {value}",
+                )
+        elif key == "kernel":
+            out.kernel = value  # empty string resets the kernel
+        else:
+            raise typer.BadParameter(f"unknown machine setting: {key}")
+    return out
+
+
 def _network_dict(info: NetworkInfo) -> dict[str, Any]:
     """Serialise a :class:`NetworkInfo` as a flat JSON-able dict."""
     return {
@@ -1060,6 +1304,7 @@ def _network_dict(info: NetworkInfo) -> dict[str, Any]:
 
 
 app.add_typer(network_app, name="network")
+app.add_typer(machine_app, name="machine")
 
 
 if __name__ == "__main__":

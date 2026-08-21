@@ -379,6 +379,7 @@ Containerization/XPC. Behind capability flags. *Test:* same `Backend` contract t
 | **icarus** | Flew into the maze's sky | Exec / cp / logs / export — entry & extraction |
 | **ariadne** | Gave the thread through the maze | Instrumentation & telemetry (eBPF/kernel/init) |
 | **minos** | King who judged the Labyrinth | Forensics, behavioral report, scoring |
+| **machina** | deus ex machina — the god-machine | Persistent machine plane: stateful VMs (create/inspect/set/run/logs), init-capability advisor |
 
 ---
 
@@ -386,7 +387,7 @@ Containerization/XPC. Behind capability flags. *Test:* same `Backend` contract t
 
 ## 9. Implementation status vs container 1.2.2
 
-The DAEDALUS control plane is fully implemented (Python, 23 modules, 193 tests, mypy strict,
+The DAEDALUS control plane is fully implemented (Python, 24 modules, mypy strict,
 MCP + API + CLI surfaces).  The host runs container CLI **1.2.2** (commit `0190097`) — the
 same release Orchard pins.  Everything in this section is **implemented and working** against
 that release; anything still gated lives in the "container 1.2.2 reality" note below.
@@ -403,6 +404,7 @@ that release; anything still gated lives in the "container 1.2.2 reality" note b
 | icarus | export — full-FS tar via `export_fs` (works on **running** containers in 1.2.2), indexed as a store artifact (`kind="fs"`) | CLI, API, MCP |
 | mint | pull, push, save, load, tag, delete, inspect, list, prune, build | CLI, API, MCP |
 | talos | network CRUD — create/list/inspect/delete (default plugin `container-network-vmnet`), topology materialization via `apply_topology` | CLI, API, MCP |
+| machina | machine create/list/inspect/set/set-default/stop/delete/run/logs — persistent stateful VMs with init-capability advisor (name heuristic + log check) and confirm-gated delete | CLI, API, MCP |
 | talos | DNS control (`--dns`, `--dns-domain`, `--dns-search`, `--no-dns`), system DNS (create/delete/list) | CLI, API, MCP |
 | forge | prune — stop + reclaim disk via `container prune` | CLI, API, MCP |
 | profiles | detonation, bench, fuzz, isolated, deception | CLI, API, MCP |
@@ -415,17 +417,23 @@ that release; anything still gated lives in the "container 1.2.2 reality" note b
 
 The 1.2.2 `network` subcommand is fully wired and wrapped (create/list/inspect/delete, default
 plugin `container-network-vmnet`); `stats`, `cp`/`copy`, `export`, and `prune` are present and
-wrapped by daedalus.  The CLI also ships `machine`, `volume`, and a `k8s` plugin — these exist
-but are **not yet wrapped** by daedalus (phases 2–3).  Run/create flags beyond the RunSpec
-extension (`--rosetta`, `--virtualization`, `--init-image`, `--publish-socket`, `--shm-size`,
-`--ulimit`) are present in 1.2.2 but not yet serialised; per-container kernels (`-k` +
-`system kernel set`) work.
+wrapped by daedalus.  The `machine` subcommand is fully wired and wrapped by the `machina`
+subsystem (create/list/inspect/set/set-default/stop/delete/run/logs, phase 2): machines require
+**init-capable images** — the machine boots the image's own `/sbin/init` as PID 1, so plain
+alpine/debian/ubuntu images will not boot (daedalus warns via the advisor and explains failures
+from the boot logs); machine **backing containers are hidden by the CLI** (the daemon's
+`container list` never shows them), and `container prune` does not touch machines.  The CLI also
+ships `volume` and a `k8s` plugin — these exist but are **not yet wrapped** by daedalus (phase 3).
+Run/create flags beyond the RunSpec extension (`--rosetta`, `--virtualization`, `--init-image`,
+`--publish-socket`, `--shm-size`, `--ulimit`) are present in 1.2.2 but not yet serialised (the
+machine `--virtualization` flag *is* serialised on `MachineCreateSpec`); per-container kernels
+(`-k` + `system kernel set`) work.
 
 ### Quality gates (all passing)
 
 ```
-mypy --strict daedalus/     → Success: no issues found in 23 source files
-pytest tests/               → 193 passed (177 unit + 16 integration)
+mypy --strict daedalus/     → Success: no issues found in 24 source files
+pytest tests/               → 225 passed, 1 skipped (205 unit + 20 integration; the slow systemd machine-boot test skips on the container 1.2.2 exec limitation, upstream apple/container#1669)
 Import-time I/O             → zero subprocess calls
 MCP (stdio)                 → 51 tools, handshake verified
 MCP (cartograph federation) → discover + call verified

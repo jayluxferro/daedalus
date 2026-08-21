@@ -9,7 +9,16 @@ from __future__ import annotations
 
 import pytest
 
-from daedalus.core.backend import NetworkInfo, NetworkSpec, PruneResult, RunSpec, StatsSample
+from daedalus.core.backend import (
+    MachineCreateSpec,
+    MachineInfo,
+    MachineSetSettings,
+    NetworkInfo,
+    NetworkSpec,
+    PruneResult,
+    RunSpec,
+    StatsSample,
+)
 from daedalus.core.capabilities import CapabilityManifest
 from daedalus.core.cli_backend import CliBackend, OutputParser
 from daedalus.core.exceptions import CapabilityError
@@ -305,7 +314,10 @@ LIST_ITEM_JSON = """{
     "dns": {"nameservers": [], "options": [], "searchDomains": []},
     "id": "f634ad0e-366e-479a-b2b1-a124064a0e27",
     "image": {
-      "descriptor": {"digest": "sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b"},
+      "descriptor": {
+        "digest": "sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b"},
+
+
       "reference": "docker.io/library/alpine:latest"
     },
     "labels": {},
@@ -363,8 +375,9 @@ class TestContainerItemParser:
 IMAGE_LIST_ITEM_JSON = """{
   "configuration": {
     "creationDate": "2026-06-16T00:00:15Z",
-    "descriptor": {"digest": "sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b",
-                    "mediaType": "application/vnd.oci.image.index.v1+json",
+    "descriptor": {
+      "digest": "sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b",
+      "mediaType": "application/vnd.oci.image.index.v1+json",
                     "size": 9218},
     "name": "docker.io/library/alpine:latest"
   },
@@ -402,3 +415,170 @@ class TestImageListItemParser:
         assert "owner=minos" in args
         assert "tier=analysis" in args
         assert args[0] == "lab"
+
+
+# ------------------------------------------------------------------
+# machine parsing (SPEC §2.1 — captured live on container 1.2.2)
+# ------------------------------------------------------------------
+
+MACHINE_LIST_JSON = """[{"createdDate": "2026-08-21T20:31:29Z", "status": "stopped",
+  "diskSize": 1169178624, "default": true, "id": "daedalus-probe-m",
+  "cpus": 8, "memory": 25769803776}]"""
+
+MACHINE_INSPECT_JSON = """[{"cpus": 8, "createdDate": "2026-08-21T20:31:29Z",
+  "diskSize": 1169178624, "homeMount": "rw", "id": "daedalus-probe-m",
+  "image": {"descriptor": {}, "reference": "docker.io/library/alpine:3.22"},
+  "memory": 25769803776, "platform": {"architecture": "arm64", "os": "linux"},
+  "status": "stopped", "userSetup": {"gid": 20, "uid": 501, "username": "jay"}}]"""
+
+
+class TestMachineListParser:
+    def test_parse_literal_list(self) -> None:
+        machines = OutputParser.machine_list(MACHINE_LIST_JSON)
+        assert len(machines) == 1
+        m = machines[0]
+        assert isinstance(m, MachineInfo)
+        assert m.id == "daedalus-probe-m"
+        assert m.status == "stopped"
+        assert m.cpus == 8
+        # memory and diskSize are bytes on the wire
+        assert m.memory_bytes == 25769803776
+        assert m.disk_size_bytes == 1169178624
+        assert m.default is True
+        assert m.created_date == "2026-08-21T20:31:29Z"
+        # list shape carries no inspect-only fields
+        assert m.home_mount == ""
+        assert m.image_ref == ""
+        assert m.platform_arch == ""
+        assert m.platform_os == ""
+        assert m.user_username == ""
+        assert m.user_uid == 0
+        assert m.user_gid == 0
+        # raw carries the full dict, not just the parsed projection
+        assert m.raw["id"] == "daedalus-probe-m"
+        assert m.raw["diskSize"] == 1169178624
+
+    def test_parse_empty_array(self) -> None:
+        assert OutputParser.machine_list("[]") == []
+
+    def test_parse_empty_text(self) -> None:
+        assert OutputParser.machine_list("") == []
+
+    def test_missing_fields_default(self) -> None:
+        [m] = OutputParser.machine_list('[{"id": "m1"}]')
+        assert m.id == "m1"
+        assert m.status == ""
+        assert m.cpus == 0
+        assert m.memory_bytes == 0
+        assert m.disk_size_bytes == 0
+        assert m.default is False
+        assert m.created_date == ""
+
+
+class TestMachineInspectParser:
+    def test_parse_literal_inspect(self) -> None:
+        m = OutputParser.machine_inspect(MACHINE_INSPECT_JSON)
+        assert isinstance(m, MachineInfo)
+        # shared list fields
+        assert m.id == "daedalus-probe-m"
+        assert m.status == "stopped"
+        assert m.cpus == 8
+        assert m.memory_bytes == 25769803776
+        assert m.disk_size_bytes == 1169178624
+        assert m.created_date == "2026-08-21T20:31:29Z"
+        # inspect-only fields merged from the richer shape
+        assert m.home_mount == "rw"
+        assert m.image_ref == "docker.io/library/alpine:3.22"
+        assert m.platform_arch == "arm64"
+        assert m.platform_os == "linux"
+        assert m.user_username == "jay"
+        assert m.user_uid == 501
+        assert m.user_gid == 20
+
+    def test_array_uses_first_element(self) -> None:
+        two = (
+            '[{"id": "first", "status": "stopped"},'
+            ' {"id": "second", "status": "running"}]'
+        )
+        m = OutputParser.machine_inspect(two)
+        assert m.id == "first"
+        assert m.status == "stopped"
+
+    def test_empty_array_returns_empty_info(self) -> None:
+        m = OutputParser.machine_inspect("[]")
+        assert m.id == ""
+        assert m.status == ""
+        assert m.cpus == 0
+        assert m.memory_bytes == 0
+        assert m.home_mount == ""
+        assert m.image_ref == ""
+        assert m.platform_arch == ""
+        assert m.platform_os == ""
+        assert m.user_username == ""
+        assert m.user_uid == 0
+        assert m.user_gid == 0
+
+    def test_machine_id_first_nonempty_line(self) -> None:
+        assert OutputParser.machine_id("daedalus-probe-m\n") == "daedalus-probe-m"
+        assert OutputParser.machine_id("") == ""
+
+
+class TestMachineSpecSerialization:
+    def test_to_cli_args_order_and_image_last(self) -> None:
+        spec = MachineCreateSpec(
+            image="alpine:3.22",
+            name="test-m",
+            set_default=True,
+            no_boot=True,
+            cpus=8,
+            memory="2G",
+            home_mount="rw",
+            virtualization=True,
+            kernel="/tmp/vmlinux",
+            arch="arm64",
+            os="linux",
+            platform="apple-silicon",
+            scheme="http",
+        )
+        args = spec.to_cli_args()
+        assert args == [
+            "--name", "test-m",
+            "--set-default",
+            "--no-boot",
+            "--cpus", "8",
+            "--memory", "2G",
+            "--home-mount", "rw",
+            "--virtualization",
+            "--kernel", "/tmp/vmlinux",
+            "--arch", "arm64",
+            "--os", "linux",
+            "--platform", "apple-silicon",
+            "--scheme", "http",
+            "alpine:3.22",
+        ]
+
+    def test_defaults_emit_image_only(self) -> None:
+        assert MachineCreateSpec(image="alpine:latest").to_cli_args() == [
+            "alpine:latest",
+        ]
+
+    def test_to_set_args_only_non_none(self) -> None:
+        settings = MachineSetSettings(
+            cpus=2, memory="4G", home_mount="ro",
+            virtualization=True, kernel="/tmp/vmlinux",
+        )
+        assert settings.to_set_args() == [
+            "cpus=2", "memory=4G", "home-mount=ro",
+            "virtualization=true", "kernel=/tmp/vmlinux",
+        ]
+
+    def test_to_set_args_virtualization_false(self) -> None:
+        settings = MachineSetSettings(virtualization=False)
+        assert settings.to_set_args() == ["virtualization=false"]
+
+    def test_to_set_args_empty_settings(self) -> None:
+        assert MachineSetSettings().to_set_args() == []
+
+    def test_to_set_args_kernel_empty_resets(self) -> None:
+        # kernel="" is meaningful — the CLI resets the kernel
+        assert MachineSetSettings(kernel="").to_set_args() == ["kernel="]

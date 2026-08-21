@@ -63,6 +63,7 @@ class CapabilityManifest:
     export: bool | str = "untested"
     prune: bool | str = "untested"
     network_subcommand: bool | str = "untested"
+    machine: bool | str = "untested"
 
     # -- flag inventory (from --help parsing) ----------------------------
     known_flags: set[str] = field(default_factory=set)
@@ -116,6 +117,7 @@ class CapabilityManifest:
             f"export:       {self._fmt(self.export)}",
             f"prune:        {self._fmt(self.prune)}",
             f"net-subcmd:   {self._fmt(self.network_subcommand)}",
+            f"machine:      {self._fmt(self.machine)}",
         ]
         if self.extra_flags:
             lines.append("─────────────────────────────────")
@@ -219,6 +221,7 @@ def probe(*, container_path: str | None = None) -> CapabilityManifest:
     m.export = _probe_subcommand(m.container_binary, "export")
     m.prune = _probe_subcommand(m.container_binary, "prune")
     m.network_subcommand = _probe_network_subcommand(m)
+    m.machine = _probe_subcommand(m.container_binary, "machine")
     m.runtime_features = _runtime_features(m)
 
     m.probe_time = _now()
@@ -489,6 +492,7 @@ def _runtime_features(m: CapabilityManifest) -> dict[str, bool | str]:
         "container_copy": m.copy is True,
         "container_export": m.export is True,
         "container_prune": m.prune is True,
+        "container_machines": m.machine is True,
         "shared_default_network": m.networking is True,
     }
 

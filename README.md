@@ -22,6 +22,7 @@ A security-research control plane built on Apple's `container` runtime. DAEDALUS
 │  talos      → networks, DNS, topology               │
 │  ariadne    → instrumentation, kernel variants      │
 │  minos      → forensic analysis, risk scoring       │
+│  machina    → machines (persistent stateful VMs)    │
 ├─────────────────────────────────────────────────────┤
 │             CROSS-CUTTING                            │
 │  profiles   → named security postures               │
@@ -99,6 +100,13 @@ daedalus run alpine:latest -d --command "echo hello from daedalus"
 # 7. See it
 daedalus ls --all
 daedalus stats                        # live CPU/mem/net stats for running containers
+
+# 8. Machines (persistent stateful VMs — init-capable image required)
+daedalus machine create alpine:latest --no-boot -n test-m   # will warn: alpine has no init system
+daedalus machine list
+daedalus machine run test-m uname -a                        # boots the machine, runs the command
+daedalus machine stop test-m
+daedalus machine delete test-m --confirm
 ```
 
 ---
@@ -135,6 +143,20 @@ daedalus network create lab-net --internal --subnet 172.31.0.0/24
 daedalus network inspect lab-net
 daedalus network delete lab-net --confirm
 
+# Machines (persistent stateful VMs — init-capable image required)
+# Machines boot the image's own /sbin/init as PID 1: plain alpine/debian/ubuntu
+# images have no init system and will not boot (the create command warns).
+# See tests/fixtures/ubuntu-machine.Dockerfile for the official systemd image.
+daedalus machine create alpine:latest --no-boot -n test-m   # init warning; stays stopped
+daedalus machine list                  # name, status, cpus, memory, disk, default
+daedalus machine inspect test-m        # full config + image/platform/user info
+daedalus machine set test-m cpus=2 memory=4G   # applies after restart
+daedalus machine set-default test-m
+daedalus machine run test-m uname -a   # boots if needed, runs as host-mapped user
+daedalus machine logs test-m           # boot/stdout log dump
+daedalus machine stop test-m
+daedalus machine delete test-m --confirm
+
 # Images
 daedalus image-pull debian:latest     # Pull from registry
 daedalus image-list                   # List local images
@@ -159,6 +181,7 @@ daedalus profiles                     # List security profiles
 | `export` | Export a container filesystem to a tar archive |
 | `prune` | Remove stopped containers, reclaim disk (requires --confirm) |
 | `network` | Network CRUD subcommands: `create`, `list`, `inspect`, `delete` |
+| `machine` | Machine subcommands: `create`, `list`, `inspect`, `set`, `set-default`, `stop`, `delete` (requires `--confirm`), `run`, `logs` |
 | `image-pull` | Pull image from registry |
 | `image-list` | List local images |
 | `system-status` | Daemon + version + container count |
@@ -202,6 +225,15 @@ python -m daedalus.api.server
 | POST | `/images/pull` | Pull image (`?image=alpine:latest`) |
 | GET | `/images/{name}` | Image detail |
 | DELETE | `/images/{name}` | Delete image |
+| GET | `/machines` | List machines |
+| POST | `/machines` | Create a machine (`{"image","name"?,"cpus"?,"memory"?,"no_boot"?}` — advisor warning echoed) |
+| GET | `/machines/{id}` | Inspect a machine |
+| POST | `/machines/{id}/set` | Set machine settings (`{"cpus"?,"memory"?,"home_mount"?,"virtualization"?,"kernel"?}`) |
+| POST | `/machines/{id}/set-default` | Make a machine the default |
+| POST | `/machines/{id}/stop` | Stop a machine |
+| DELETE | `/machines/{id}` | Delete a machine (`?confirm=true` required) |
+| POST | `/machines/{id}/run` | Boot + run command (`{"command":["uname","-a"]}` → ExecResult) |
+| GET | `/machines/{id}/logs` | Machine boot/stdout logs |
 | GET | `/profiles` | List security profiles |
 | GET | `/system/status` | Daemon status + counts + disk usage |
 | GET | `/system/audit` | Audit log (`?operation=run&limit=50`) |
@@ -217,6 +249,10 @@ curl -X POST http://127.0.0.1:8420/containers \
   -H 'Content-Type: application/json' \
   -d '{"image":"alpine:latest","detach":true}'
 curl http://127.0.0.1:8420/system/audit?limit=5 | jq .
+curl -X POST http://127.0.0.1:8420/machines \
+  -H 'Content-Type: application/json' \
+  -d '{"image":"alpine:latest","name":"test-m","no_boot":true}'
+curl -X DELETE http://127.0.0.1:8420/machines/test-m?confirm=true | jq .
 ```
 
 ### 3. Labyrinth Control Center (Web UI)
@@ -303,6 +339,15 @@ Add to your `mcp.json` or `~/.claude/config.json`:
 | `daedalus_network_delete` | Delete a network (requires `confirm=true`) |
 | `daedalus_image_pull` | Pull image from registry |
 | `daedalus_image_list` | List local images |
+| `daedalus_machine_list` | List machines |
+| `daedalus_machine_create` | Create a machine (init-capable image required — machines boot the image's own `/sbin/init`; `no_boot=true` to create without booting) |
+| `daedalus_machine_inspect` | Inspect a machine |
+| `daedalus_machine_set` | Update machine settings (apply after restart) |
+| `daedalus_machine_stop` | Stop a machine |
+| `daedalus_machine_set_default` | Make a machine the default |
+| `daedalus_machine_run` | Boot + run a command inside a machine |
+| `daedalus_machine_logs` | Machine boot/stdout logs |
+| `daedalus_machine_delete` | Delete a machine (requires `confirm=true`) |
 | `daedalus_profiles` | List security profiles |
 
 ---
@@ -436,9 +481,9 @@ cd ui && npm run dev
 ## Quality Gates
 
 ```
-mypy --strict daedalus/     → Success: no issues found in 23 source files
-pytest tests/ -q            → 193 passed (177 unit + 16 integration)
-pytest -m integration       → 16 passed (requires container daemon)
+mypy --strict daedalus/     → Success: no issues found in 24 source files
+pytest tests/ -q            → 225 passed, 1 skipped (205 unit + 20 integration)
+pytest -m integration       → 20 passed, 1 skipped (requires container daemon)
 Proxy across 7 profiles     → All pass (CLI + API + MCP surfaces)
 UI build                    → TypeScript clean, 8/8 checks pass
 ruff check                  → cosmetic only (E501, SIM*, UP042)

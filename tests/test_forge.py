@@ -10,6 +10,9 @@ from daedalus.core.backend import (
     ContainerInfo,
     ContainerState,
     ExecResult,
+    MachineCreateSpec,
+    MachineInfo,
+    MachineSetSettings,
     NetworkInfo,
     NetworkSpec,
     PruneResult,
@@ -51,11 +54,18 @@ class MockBackend(Backend):
         self.networks: dict[str, NetworkInfo] = {}
         self.network_create_calls: list[NetworkSpec] = []
         self.network_delete_calls: list[str] = []
+        self.machine_calls: list[tuple[str, tuple]] = []
+        self.machine_logs_result: str = ""
 
     def _cid(self) -> str:
         cid = f"mock-{self.next_id:04d}"
         self.next_id += 1
         return cid
+
+    def _mid(self) -> str:
+        mid = f"m{self.next_id}"
+        self.next_id += 1
+        return mid
 
     def _info(self, cid: str, name: str, image: str, state: ContainerState) -> ContainerInfo:
         return ContainerInfo(id=cid, name=name, image=image, state=state, raw={"id": cid})
@@ -210,6 +220,44 @@ class MockBackend(Backend):
     async def network_delete(self, name: str) -> None:
         self.network_delete_calls.append(name)
         self.networks.pop(name, None)
+
+    # -- machines (canned call-recording stubs) --
+    async def machine_create(self, spec: MachineCreateSpec) -> MachineInfo:
+        self.machine_calls.append(("create", (spec,)))
+        return MachineInfo(id=self._mid())
+    async def machine_list(self) -> list[MachineInfo]:
+        self.machine_calls.append(("list", ()))
+        return []
+    async def machine_inspect(self, machine_id: str) -> MachineInfo:
+        self.machine_calls.append(("inspect", (machine_id,)))
+        return MachineInfo(id=machine_id)
+    async def machine_delete(self, machine_id: str) -> None:
+        self.machine_calls.append(("delete", (machine_id,)))
+    async def machine_stop(self, machine_id: str) -> None:
+        self.machine_calls.append(("stop", (machine_id,)))
+    async def machine_set(
+        self, machine_id: str, settings: MachineSetSettings,
+    ) -> None:
+        self.machine_calls.append(("set", (machine_id, settings)))
+    async def machine_set_default(self, machine_id: str) -> None:
+        self.machine_calls.append(("set_default", (machine_id,)))
+    async def machine_run(
+        self,
+        machine_id: str,
+        argv: list[str],
+        *,
+        env: dict[str, str] | None = None,
+        gid: int | None = None,
+        interactive: bool = False,
+        timeout: float = 60.0,
+    ) -> ExecResult:
+        self.machine_calls.append(
+            ("run", (machine_id, argv, env, gid, interactive, timeout)),
+        )
+        return ExecResult(0, "", "")
+    async def machine_logs(self, machine_id: str) -> str:
+        self.machine_calls.append(("logs", (machine_id,)))
+        return self.machine_logs_result
 
     async def _run_cli(self, *args: str, **kwargs: object) -> tuple[int, str, str]:
         return (0, "", "")
