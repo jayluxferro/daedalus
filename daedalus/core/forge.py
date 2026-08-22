@@ -10,19 +10,35 @@ applied *before* any backend call.
 
 from __future__ import annotations
 
+import asyncio
 import builtins
 import contextlib
 import json
 import os
+import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
 from daedalus.core.audit import ActorKind, AuditLog
-from daedalus.core.backend import Backend, ContainerInfo, RunSpec, StatsSample
+from daedalus.core.backend import (
+    Backend,
+    ContainerInfo,
+    ExecResult,
+    NetworkSpec,
+    RunSpec,
+    StatsSample,
+)
 from daedalus.core.capabilities import CapabilityManifest
-from daedalus.core.exceptions import ValidationError
-from daedalus.core.minos import Minos
+from daedalus.core.exceptions import (
+    BackendTimeoutError,
+    DaedalusError,
+    DetonationError,
+    ValidationError,
+)
+from daedalus.core.icarus import ExecOptions, Icarus
+from daedalus.core.minos import BehavioralReport, Minos, stats_samples_to_snapshots
+from daedalus.core.talos import Talos
 
 # Detached with no command: image defaults exit immediately in the background.
 DEFAULT_DETACHED_COMMAND: list[str] = ["tail", "-f", "/dev/null"]
@@ -260,11 +276,22 @@ class Forge:
             args={"container_id": container_id, "force": force},
         )
 
-    async def destroy(self, container_id: str, *, confirm: bool = False) -> dict[str, Any] | None:
+    async def destroy(
+        self,
+        container_id: str,
+        *,
+        confirm: bool = False,
+        report: Any = None,
+    ) -> dict[str, Any] | None:
         """Destroy a Labyrinth: stop (if running) then delete.
 
         Requires explicit ``confirm=True`` (policy-gated).
         Returns a behavioral report dict when analysis completes.
+
+        ``report``: an optional pre-built ``BehavioralReport`` (or anything
+        with ``to_dict()``) written as-is instead of the thinner logs-only
+        re-analysis — phase 3 ``detonate`` passes its rich report here so it
+        cannot be overwritten by a report derived from logs alone.
         """
         r = self._policy.check_destroy(confirm=confirm)
         if r.decision == Decision.CONFIRM:
@@ -293,14 +320,19 @@ class Forge:
 
         report_data: dict[str, Any] | None = None
         try:
-            minos = Minos(self._backend)
-            report = await minos.analyze(
-                container_id,
-                image=manifest.image if manifest else "",
-                image_digest=manifest.image_digest if manifest else "",
-                boot_log=boot_log or process_logs,
-            )
-            report_data = report.to_dict()
+            if report is not None:
+                # Phase 3: detonate passes its rich report — write it as-is
+                # rather than re-analyzing from logs alone (which would
+                # produce a thinner report and overwrite the rich one).
+                report_data = report.to_dict()
+            else:
+                logs_report = await Minos(self._backend).analyze(
+                    container_id,
+                    image=manifest.image if manifest else "",
+                    image_digest=manifest.image_digest if manifest else "",
+                    boot_log=boot_log or process_logs,
+                )
+                report_data = logs_report.to_dict()
             report_path = os.path.join(
                 self._store.root, f"{container_id}.report.json",
             )
@@ -320,6 +352,243 @@ class Forge:
 
         self._store.update(container_id, exit_code=0)
         return report_data
+
+    async def detonate(
+        self,
+        sample: str,
+        *,
+        image: str = "alpine:latest",
+        profile: str = "detonation",
+        name: str | None = None,
+        command: list[str] | None = None,
+        observe_seconds: float = 30.0,
+        stats_interval: float = 2.0,
+        network_name: str | None = None,
+        profile_kwargs: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Detonate a sample in a disposable, isolated Labyrinth.
+
+        The full loop (SPEC phase 3 §3.2): policy gate → disposable internal
+        network → keep-alive run → pre-export baseline → sample delivery →
+        concurrent exec + stats sampling → post-evidence (logs + post-export)
+        → judge (Minos) → persist (report file + store artifacts + audit) →
+        destroy with the rich report.  The network is always deleted in a
+        ``finally`` — no leak on aborted runs.
+
+        ``profile`` is used for the run label and the audit entry only — it
+        is NOT resolved to kwargs here.  Surfaces resolve the profile via
+        ``ProfileRegistry`` and pass the resulting kwargs as
+        ``profile_kwargs`` (consistent with ``run``/``create``).
+
+        The sample is copied into the container as ``/root/sample<ext>``
+        and executed via ``sh`` (or the explicit ``command``) while stats
+        are sampled every ``stats_interval`` seconds (floored at 0.1 s).
+        Exec timing out at the observation boundary is normal completion —
+        the run was observed for the full ``observe_seconds`` window; the
+        reported ``exit_code`` is then the conventional timeout code 124.
+
+        **Delivery path is /root, never /tmp**: profiles that mount tmpfs
+        on ``/tmp`` shadow the disk layer there, so a file copied into
+        ``/tmp`` is invisible to ``exec`` (the sample would never run) —
+        and tmpfs writes are invisible to the post-run export, which would
+        blind the filesystem-delta evidence that is the whole point of the
+        report.
+
+        Returns
+        -------
+        dict with ``run_id``, ``report`` (``BehavioralReport.to_dict()``),
+        ``report_path``, ``artifacts`` (store artifact paths), ``risk_score``,
+        and ``exit_code``.
+
+        Raises
+        ------
+        DetonationError
+            If the loop fails partway through.  The VM and network are
+            destroyed first (best-effort); ``partial_evidence`` carries the
+            pre/post tars and report path that were actually written.
+        """
+        kwargs = dict(profile_kwargs or {})
+
+        # Step 1 — policy gate (concurrency / disk / image), same as run/create.
+        await self._check_run(image, **kwargs)
+
+        run_name = name or (
+            f"detonation-{datetime.now(UTC).strftime('%Y%m%d-%H%M%S')}"
+            f"-{uuid.uuid4().hex[:8]}"
+        )
+        talos = Talos(
+            self._backend, self._capabilities,
+            policy=self._policy, audit=self._audit,
+        )
+
+        # Step 2 — disposable internal network (always cleaned up in finally).
+        if network_name is None:
+            network = f"daedalus-detonation-{run_name}"
+            try:
+                await talos.network_create(NetworkSpec(name=network, internal=True))
+            except DaedalusError as exc:
+                # A same-name network already exists — reuse it.
+                if "already" not in (str(exc) + str(exc.details)).lower():
+                    raise
+        else:
+            network = network_name
+
+        run_id = ""
+        partial_evidence: dict[str, Any] = {}
+        try:
+            # Step 3 — keep-alive run (NOT the sample yet).
+            lab = await self.run(
+                image,
+                name=run_name,
+                profile=profile,
+                detach=True,
+                network=network,
+                command=list(DEFAULT_DETACHED_COMMAND),
+                **kwargs,
+            )
+            run_id = lab.id
+            icarus = Icarus(
+                self._backend, audit=self._audit, store=self._store,
+            )
+            pre_path = os.path.join(self._store.root, f"{run_id}.pre.tar")
+            post_path = os.path.join(self._store.root, f"{run_id}.post.tar")
+            report_path = os.path.join(self._store.root, f"{run_id}.report.json")
+
+            # Step 4 — baseline filesystem export.
+            await icarus.export_fs(run_id, output_path=pre_path)
+            partial_evidence["pre_tar"] = pre_path
+
+            # Step 5 — deliver the sample, preserving its extension.
+            # /root (not /tmp): tmpfs mounts shadow /tmp for exec AND hide
+            # runtime writes from the export diff (see the method docstring).
+            suffix = os.path.splitext(os.path.basename(sample))[1] or ".bin"
+            dest = f"/root/sample{suffix}"
+            await icarus.copy_to(run_id, sample, dest)
+
+            # Step 6 — detonate + observe concurrently: exec the sample while
+            # a sampler drains stats into ``samples`` until exec completes.
+            sample_cmd = command or ["sh", dest]
+            samples: list[StatsSample] = []
+            exec_task = asyncio.create_task(
+                icarus.exec(
+                    run_id, sample_cmd,
+                    options=ExecOptions(timeout=observe_seconds),
+                ),
+            )
+            sampler_task = asyncio.create_task(
+                self._detonation_sampler(run_id, stats_interval, samples),
+            )
+            try:
+                try:
+                    exec_result = await exec_task
+                except BackendTimeoutError:
+                    # The sample ran the full observation window — normal
+                    # completion.  The runtime killed the exec session; use
+                    # the conventional "timed out" exit code.
+                    exec_result = ExecResult(exit_code=124, stdout="", stderr="")
+            finally:
+                sampler_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await sampler_task
+
+            # Step 7 — post-evidence: boot + process logs, post-export.
+            boot_log = await icarus.logs(run_id, boot=True)
+            process_logs = await icarus.logs(run_id)
+            await icarus.export_fs(run_id, output_path=post_path)
+            partial_evidence["post_tar"] = post_path
+
+            # Step 8 — judge: pre/post FS diff + stats snapshots + logs.
+            minos = Minos(self._backend)
+            report: BehavioralReport = await minos.analyze(
+                run_id,
+                image=image,
+                pre_tar=pre_path,
+                post_tar=post_path,
+                stats_data=stats_samples_to_snapshots(samples),
+                boot_log=f"{boot_log}\n{process_logs}",
+            )
+            report_dict = report.to_dict()
+
+            # Step 9 — persist: report file, store artifacts, audit.
+            with open(report_path, "w") as f:
+                f.write(json.dumps(report_dict, indent=2))
+            partial_evidence["report_path"] = report_path
+            self._store.add_artifact(
+                run_id,
+                Artifact(
+                    name="report.json", path=report_path, kind="report",
+                    description="Minos behavioral report (detonation)",
+                ),
+            )
+            self._store.add_artifact(
+                run_id,
+                Artifact(
+                    name="filesystem.pre.tar", path=pre_path, kind="fs",
+                    description="Filesystem export before detonation",
+                ),
+            )
+            self._store.add_artifact(
+                run_id,
+                Artifact(
+                    name="filesystem.post.tar", path=post_path, kind="fs",
+                    description="Filesystem export after detonation",
+                ),
+            )
+            self._audit.record(
+                "detonate", actor="forge", actor_kind=ActorKind.SERVICE,
+                args={
+                    "sample": sample, "image": image, "profile": profile,
+                    "observe_seconds": observe_seconds,
+                },
+                result={
+                    "run_id": run_id,
+                    "risk_score": report.risk_score,
+                    "fs_changes": report.filesystem.total_changes,
+                },
+            )
+
+            # Step 10 — destroy with the rich report (no thinner re-analysis).
+            await self.destroy(run_id, confirm=True, report=report)
+
+            manifest = self._store.get(run_id)
+            return {
+                "run_id": run_id,
+                "report": report_dict,
+                "report_path": report_path,
+                "artifacts": [a.path for a in manifest.artifacts] if manifest else [],
+                "risk_score": report.risk_score,
+                "exit_code": exec_result.exit_code,
+            }
+        except Exception as exc:
+            # Cleanup first (best-effort), then re-raise with context.
+            if run_id:
+                with contextlib.suppress(Exception):
+                    await self.destroy(run_id, confirm=True)
+            raise DetonationError(
+                f"Detonation failed for sample '{sample}'"
+                + (f" (run {run_id})" if run_id else ""),
+                partial_evidence=partial_evidence,
+            ) from exc
+        finally:
+            if network is not None:
+                with contextlib.suppress(Exception):
+                    await talos.network_delete(network, confirm=True)
+
+    async def _detonation_sampler(
+        self, run_id: str, interval: float, sink: list[StatsSample],
+    ) -> None:
+        """Sample container stats every ``interval`` seconds into ``sink``.
+
+        Runs until cancelled — the detonate loop cancels it when the sample
+        exec completes.  The interval is floored at 0.1 s so a zero or
+        negative ``stats_interval`` cannot busy-loop the backend.
+        """
+        interval = max(interval, 0.1)
+        while True:
+            await asyncio.sleep(interval)
+            sampled = await self.stats(run_id)
+            if sampled:
+                sink.append(sampled[0])
 
     async def list(self, all: bool = False) -> list[Labyrinth]:
         infos = await self._backend.list(all=all)

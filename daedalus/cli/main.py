@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from typing import Annotated, Any
 
 import typer
@@ -22,7 +23,7 @@ from daedalus.core.backend import (
 )
 from daedalus.core.capabilities import CapabilityManifest, ensure_daemon, probe
 from daedalus.core.cli_backend import CliBackend
-from daedalus.core.exceptions import ValidationError
+from daedalus.core.exceptions import DetonationError, ValidationError
 from daedalus.core.forge import Forge
 from daedalus.core.icarus import ExecOptions, Icarus
 from daedalus.core.machina import Machina
@@ -305,6 +306,65 @@ def run(
             ip = ""
             if ip:
                 console.print(f"  IP:   {ip}  (host-reachable via vmnet)")
+    asyncio.run(_go())
+
+
+@app.command()
+def detonate(
+    sample: str,
+    image: Annotated[str, typer.Option("--image")] = "alpine:latest",
+    profile: Annotated[str, typer.Option("--profile", "-p")] = "detonation",
+    name: Annotated[str | None, typer.Option("--name")] = None,
+    observe: Annotated[
+        float,
+        typer.Option("--observe", help="Observation window in seconds"),
+    ] = 30.0,
+    stats_interval: Annotated[
+        float,
+        typer.Option("--stats-interval", help="Stats sampling interval in seconds"),
+    ] = 2.0,
+    command: Annotated[
+        list[str] | None,
+        typer.Option("--command", help="Override the execution command (repeatable)"),
+    ] = None,
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Detonate a sample in a disposable, isolated container.
+
+    The engine runs the sample in a freshly created container on a
+    disposable internal network, snapshots the filesystem before/after,
+    samples stats while it runs, judges the evidence (Minos), persists a
+    report to the store, and destroys the container.
+    """
+    if not os.path.isfile(sample):
+        raise typer.BadParameter(f"sample not found: {sample}")
+    _bootstrap()
+    p = _p().get(profile)
+    kwargs = p.apply()
+
+    async def _go() -> None:
+        try:
+            result = await _f().detonate(
+                sample,
+                image=image,
+                profile=profile,
+                name=name,
+                command=command,
+                observe_seconds=observe,
+                stats_interval=stats_interval,
+                profile_kwargs=kwargs,
+            )
+        except DetonationError as exc:
+            console.print(f"[red]✗[/] {exc.message}")
+            if exc.partial_evidence:
+                console.print("  Partial evidence:")
+                for role, path in exc.partial_evidence.items():
+                    console.print(f"    {role}: {path}")
+            raise typer.Exit(code=1) from None
+        if json_output:
+            console.print(json.dumps(result, indent=2))
+            return
+        _print_detonation_report(result)
     asyncio.run(_go())
 
 
@@ -1243,6 +1303,71 @@ def profiles() -> None:
 # ==================================================================
 # Helpers
 # ==================================================================
+
+
+def _risk_label(score: float) -> str:
+    """Map a risk score (0.0–1.0) to a severity label."""
+    if score > 0.7:
+        return "HIGH"
+    if score > 0.3:
+        return "MEDIUM"
+    if score > 0.0:
+        return "LOW"
+    return "NONE"
+
+
+def _print_detonation_report(result: dict[str, Any]) -> None:
+    """Render a detonation result dict as a human-readable summary.
+
+    ``result["report"]`` is ``BehavioralReport.to_dict()`` — the engine has
+    already consumed the rich report; here we only present the parts an
+    operator cares about (risk, evidence counts, findings, artifact paths).
+    """
+    report = result.get("report") or {}
+    fs = report.get("filesystem") or {}
+    net = report.get("network") or {}
+    resources = report.get("resources") or {}
+    risk = float(report.get("risk_score", 0.0))
+    run_id = str(result.get("run_id", ""))[:12]
+    console.print(
+        f"[green]✓[/] Detonation complete — run [bold]{run_id}[/]"
+        f" (exit code {result.get('exit_code', '?')})",
+    )
+    console.print(f"Risk:       {risk:.2f} ({_risk_label(risk)})")
+    console.print(f"Image:      {report.get('image', '')}")
+    console.print(f"Duration:   {float(resources.get('duration_seconds', 0.0)):.1f}s")
+    total = int(fs.get("total_changes", 0))
+    console.print(
+        f"Filesystem: {total} change{'s' if total != 1 else ''}"
+        f" ({fs.get('added_count', 0)} added,"
+        f" {fs.get('modified_count', 0)} modified,"
+        f" {fs.get('removed_count', 0)} removed)",
+    )
+    for path in (fs.get("added") or [])[:10]:
+        console.print(f"  [green]+[/] {path}")
+    for path in (fs.get("modified") or [])[:10]:
+        console.print(f"  [yellow]~[/] {path}")
+    for path in (fs.get("removed") or [])[:10]:
+        console.print(f"  [red]-[/] {path}")
+    console.print(
+        f"Network:    {len(net.get('connections') or [])} connections,"
+        f" {len(net.get('dns_queries') or [])} DNS queries,"
+        f" {int(net.get('total_bytes_sent', 0)) + int(net.get('total_bytes_received', 0))}"
+        " bytes",
+    )
+    syscalls = report.get("syscalls") or {}
+    console.print(
+        f"Syscalls:   {syscalls.get('total_calls', 0)} total,"
+        f" {syscalls.get('unique_syscalls', 0)} unique",
+    )
+    console.print(f"CPU peak:   {float(resources.get('peak_cpu_percent', 0.0)):.1f}%")
+    for finding in (report.get("findings") or [])[:10]:
+        console.print(f"[dim]  - {finding}[/]")
+    for factor in (report.get("risk_factors") or [])[:10]:
+        console.print(f"[yellow]  ! {factor}[/]")
+    report_path = result.get("report_path")
+    if report_path:
+        console.print(f"Report:     {report_path}")
 
 
 def _fmt_size(b: int) -> str:

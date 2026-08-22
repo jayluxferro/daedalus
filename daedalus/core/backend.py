@@ -375,15 +375,17 @@ class StatsSample:
     def cpu_percent(self, prev: StatsSample) -> float:
         """CPU utilisation of this sample relative to ``prev``, 0..100.
 
-        percent = delta_cpu_usec / delta_time_sec * 100.  Returns 0.0
-        when the time delta is zero or negative (guards division by
+        percent = (delta_cpu_usec / 1e6) / delta_time_sec * 100 —
+        ``cpu_usage_usec`` is cumulative MICROseconds, so the delta is
+        converted to core-seconds before dividing by wall time.  Returns
+        0.0 when the time delta is zero or negative (guards division by
         zero) or when CPU time did not advance.
         """
         delta_usec = self.cpu_usage_usec - prev.cpu_usage_usec
         delta_time = self.sampled_at - prev.sampled_at
         if delta_time <= 0 or delta_usec <= 0:
             return 0.0
-        percent = (delta_usec / delta_time) * 100.0
+        percent = ((delta_usec / 1e6) / delta_time) * 100.0
         return max(0.0, min(100.0, percent))
 
     def to_dict(self) -> dict[str, Any]:

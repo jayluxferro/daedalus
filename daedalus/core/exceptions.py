@@ -158,6 +158,32 @@ class ValidationError(DaedalusError):
         )
 
 
+class DetonationError(DaedalusError):
+    """Raised when the detonation loop fails partway through.
+
+    A failed detonation may still have produced partial evidence on disk
+    (the pre/post filesystem tars and the report).  ``partial_evidence``
+    maps the evidence roles that completed before the failure to their
+    on-disk paths, so callers can salvage what was written.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        partial_evidence: dict[str, Any] | None = None,
+    ) -> None:
+        self.partial_evidence: dict[str, Any] = dict(partial_evidence or {})
+        details: dict[str, Any] = {}
+        if self.partial_evidence:
+            details["partial_evidence"] = self.partial_evidence
+        super().__init__(
+            code="DETONATION_ERROR",
+            message=message,
+            details=details,
+        )
+
+
 class AuditError(DaedalusError):
     """Raised when an audit operation fails (e.g., checksum mismatch)."""
 

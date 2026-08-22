@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
-from daedalus.core.backend import Backend
+from daedalus.core.backend import Backend, StatsSample
 
 # ==========================================================================
 # Evidence
@@ -64,6 +64,45 @@ class ResourceProfile:
     total_disk_reads: int = 0
     peak_pid_count: int = 0
     duration_seconds: float = 0.0
+
+
+# ==========================================================================
+# Stats adapter (phase 1 shape → minos inputs)
+# ==========================================================================
+
+
+def stats_samples_to_snapshots(
+    samples: list[StatsSample],
+) -> list[dict[str, Any]]:
+    """Map phase-1 ``StatsSample`` records to ``_analyze_stats`` inputs.
+
+    This is THE single mapping between the phase-1 stats shape (``container
+    stats``) and minos's ResourceProfile inputs — the detonation loop feeds
+    its sampled ``StatsSample`` list through here before analysis.
+
+    ``cpu_percent`` is a pairwise rate: ``samples[i].cpu_percent(samples[i-1])``
+    against the immediately preceding sample, with the first sample pinned to
+    0.0 (there is no previous sample to rate against).  ``monotonic`` carries
+    the raw :func:`time.monotonic` stamp so ``_analyze_stats`` can compute
+    wall-clock duration without ISO-string parsing; ``timestamp`` is the
+    stringified stamp, kept as an ordering/display placeholder.
+    """
+    if not samples:
+        return []
+    snapshots: list[dict[str, Any]] = []
+    for i, sample in enumerate(samples):
+        snapshots.append(
+            {
+                "cpu_percent": 0.0 if i == 0 else sample.cpu_percent(samples[i - 1]),
+                "memory_usage": sample.memory_usage_bytes,
+                "pid_count": sample.num_processes,
+                "block_write": sample.block_write_bytes,
+                "block_read": sample.block_read_bytes,
+                "timestamp": str(sample.sampled_at),
+                "monotonic": float(sample.sampled_at),
+            }
+        )
+    return snapshots
 
 
 # ==========================================================================
@@ -337,19 +376,28 @@ class Minos:
             total_disk_w = max(total_disk_w, int(s.get("block_write", 0)))
             total_disk_r = max(total_disk_r, int(s.get("block_read", 0)))
 
-        # Duration from first to last snapshot
+        # Duration from first to last snapshot.  Phase 3: snapshots produced
+        # by stats_samples_to_snapshots carry a ``monotonic`` float (the raw
+        # time.monotonic() stamp) — use it directly when present, clamped to
+        # >= 0; keep the legacy ISO-timestamp parse as the fallback for
+        # snapshots built without the adapter.
         duration = 0.0
         if len(snapshots) >= 2:
-            try:
-                t0 = snapshots[0].get("timestamp", "")
-                t1 = snapshots[-1].get("timestamp", "")
-                if t0 and t1:
-                    from datetime import datetime
-                    d0 = datetime.fromisoformat(t0)
-                    d1 = datetime.fromisoformat(t1)
-                    duration = (d1 - d0).total_seconds()
-            except Exception:
-                pass
+            mono0 = snapshots[0].get("monotonic")
+            mono1 = snapshots[-1].get("monotonic")
+            if mono0 is not None and mono1 is not None:
+                duration = max(0.0, float(mono1) - float(mono0))
+            else:
+                try:
+                    t0 = snapshots[0].get("timestamp", "")
+                    t1 = snapshots[-1].get("timestamp", "")
+                    if t0 and t1:
+                        from datetime import datetime
+                        d0 = datetime.fromisoformat(t0)
+                        d1 = datetime.fromisoformat(t1)
+                        duration = (d1 - d0).total_seconds()
+                except Exception:
+                    pass
 
         return ResourceProfile(
             peak_cpu_percent=peak_cpu,

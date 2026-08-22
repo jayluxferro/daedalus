@@ -33,7 +33,9 @@ class TestProfiles:
         p = BUILTIN_PROFILES["detonation"]
         assert p.no_dns is True
         assert p.dns == []
-        assert p.tmpfs == ["/tmp", "/var/tmp"]
+        # tmpfs deliberately absent: tmpfs on /tmp hides runtime drops from
+        # the post-run export (blinding FS-diff forensics), and the VM is
+        # destroyed after analysis so anti-persistence is moot.
 
     def test_bench_is_permissive(self):
         p = BUILTIN_PROFILES["bench"]
@@ -45,7 +47,8 @@ class TestProfiles:
         kwargs = p.apply()
         assert kwargs["no_dns"] is True
         assert kwargs["dns"] == []
-        assert kwargs["tmpfs"] == ["/tmp", "/var/tmp"]
+        # See test_detonation_is_safe — tmpfs removed for forensic completeness.
+        assert kwargs["tmpfs"] == []
 
     def test_apply_accepts_overrides(self):
         p = BUILTIN_PROFILES["detonation"]

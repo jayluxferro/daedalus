@@ -111,6 +111,43 @@ daedalus machine delete test-m --confirm
 
 ---
 
+## Detonation (the flagship workflow)
+
+This is what DAEDALUS is for: take an untrusted artifact, execute it once, capture
+everything it does, and destroy the VM — from one command. `Forge.detonate` runs the full
+loop (SPEC phase 3 §3.2): policy gate → disposable **internal** network → VM boot →
+pre-run filesystem export → sample delivery → execution while stats are sampled →
+post-run logs + filesystem export → Minos behavioral report + risk score → evidence
+persisted to the store → **VM and network destroyed**.
+
+```bash
+daedalus detonate ./suspicious.elf --observe 30
+```
+
+**The evidence you get back:**
+
+| Evidence | Where it comes from | What it shows |
+|---|---|---|
+| Filesystem diff | Pre/post full-FS export (works on the running VM) | Every file added/modified/removed during the run — e.g. a dropper's `/root/dropped.txt` |
+| Stats profile | Stats sampled every `--stats-interval` s while the sample runs | CPU / memory / process-count timeline |
+| Logs | Boot + process logs | What booted and what the sample printed |
+| Report + risk score | Minos judge (FS diff + stats + logs) | `report.json` in the store, `NONE/LOW/MEDIUM/HIGH` risk label |
+
+The VM is **always destroyed afterward** — nothing survives but the evidence (pre/post
+filesystem tars + report in the store) and the audit entry. Pass `--json` for the full
+result dict (`run_id`, `report`, `report_path`, `artifacts`, `risk_score`, `exit_code`).
+
+```bash
+daedalus detonate ./suspicious.elf --observe 30 --json
+```
+
+Options: `--image` (default `alpine:latest`), `--profile` (default `detonation`), `--name`,
+`--observe N` (observation window, default 30 s — an exec that runs past it reports exit
+code 124, which is normal), `--stats-interval N`, `--command` (override how the sample
+executes; default `sh <sample>`).
+
+---
+
 ## Consumer Surfaces
 
 DAEDALUS has three consumer surfaces — use whichever fits your workflow.
@@ -125,6 +162,7 @@ daedalus system-status                # Daemon + version + container counts
 # Containers
 daedalus run alpine:latest -d         # Create + start (detached, auto-keepalive)
 daedalus run debian:latest -d -p detonation  # Detonation profile for malware analysis
+daedalus detonate ./suspicious.elf --observe 30   # THE flagship: detonate, report, destroy
 daedalus ls                           # List running
 daedalus ls --all                     # List all (including stopped)
 daedalus inspect <id>                 # Full JSON inspect
@@ -171,6 +209,7 @@ daedalus profiles                     # List security profiles
 |---|---|
 | `probe` | Host capability manifest |
 | `run` | Create and start a container |
+| `detonate` | Run a sample in a disposable isolated VM → behavioral report + risk score, then destroy the VM |
 | `ls` | List containers |
 | `inspect` | Inspect a container |
 | `exec` | Execute command inside container |
@@ -212,6 +251,11 @@ python -m daedalus.api.server
 | POST | `/containers/{id}/copy` | Copy to/from container (`{"source","destination","direction"}`) |
 | POST | `/containers/{id}/export` | Export FS to tar (`{"output_path"?}`) |
 | POST | `/containers/prune` | Remove stopped containers (`{"confirm":true}`) |
+| POST | `/detonate` | Detonate a host-local sample (`{"sample","image"?,"profile"?,"name"?,"observe_seconds"?,"stats_interval"?}` — blocking, 30–90 s; VM destroyed afterward) |
+| GET | `/experiments` | List experiment manifests (detonations and runs in the store) |
+| GET | `/experiments/{run_id}` | Inspect an experiment manifest |
+| GET | `/experiments/{run_id}/report` | The behavioral report for a detonation (404 when absent) |
+| DELETE | `/experiments/{run_id}` | Delete an experiment manifest |
 | GET | `/networks` | List networks |
 | POST | `/networks` | Create a network |
 | GET | `/networks/{name}` | Inspect a network |
@@ -253,6 +297,9 @@ curl -X POST http://127.0.0.1:8420/machines \
   -H 'Content-Type: application/json' \
   -d '{"image":"alpine:latest","name":"test-m","no_boot":true}'
 curl -X DELETE http://127.0.0.1:8420/machines/test-m?confirm=true | jq .
+curl -X POST http://127.0.0.1:8420/detonate \
+  -H 'Content-Type: application/json' \
+  -d '{"sample":"/path/to/suspicious.elf","observe_seconds":30}' | jq .
 ```
 
 ### 3. Labyrinth Control Center (Web UI)
@@ -323,6 +370,7 @@ Add to your `mcp.json` or `~/.claude/config.json`:
 |---|---|
 | `daedalus_health` | Host capability manifest — call first |
 | `daedalus_run` | Create + start container |
+| `daedalus_detonate` | The safe-detention verb: detonate a host-local sample in a disposable isolated VM, return the behavioral report + risk score, destroy the VM (`readOnlyHint=false`, `destructiveHint=true` — a VM is created and destroyed; blocks ~30–90 s) |
 | `daedalus_list` | List containers |
 | `daedalus_inspect` | Inspect container |
 | `daedalus_exec` | Execute command inside container |
@@ -357,7 +405,7 @@ Add to your `mcp.json` or `~/.claude/config.json`:
 | Profile | Use case | Key settings |
 |---|---|---|
 | `general` | Normal Linux VM use | No restrictions |
-| `detonation` | Malware analysis (default for security) | Controlled DNS, tmpfs for /tmp, no external DNS |
+| `detonation` | Malware analysis (default for security) | DNS fully blocked; deliberately **no tmpfs** — the VM is destroyed after analysis, and tmpfs writes would be invisible to the pre/post FS diff that powers the report |
 | `bench` | Benchmarking and development | Permissive |
 | `fuzz` | Kernel fuzzing / escape research | KASAN kernel |
 | `isolated` | Air-gapped analysis | No DNS |
@@ -482,8 +530,9 @@ cd ui && npm run dev
 
 ```
 mypy --strict daedalus/     → Success: no issues found in 24 source files
-pytest tests/ -q            → 225 passed, 1 skipped (205 unit + 20 integration)
-pytest -m integration       → 20 passed, 1 skipped (requires container daemon)
+pytest tests/ -q            → 236 passed, 1 skipped (214 unit + 22 integration)
+pytest -m integration       → 22 passed, 1 skipped (requires container daemon)
+Detonation §M7 test         → 2 live detonations: dropper vs no-op reports distinguishable, no leaks
 Proxy across 7 profiles     → All pass (CLI + API + MCP surfaces)
 UI build                    → TypeScript clean, 8/8 checks pass
 ruff check                  → cosmetic only (E501, SIM*, UP042)

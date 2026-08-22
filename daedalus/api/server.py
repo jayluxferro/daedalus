@@ -48,6 +48,16 @@ Endpoints::
     # Profiles
     GET  /profiles
 
+    # Detonation
+    POST /detonate
+
+    # Experiments
+    GET  /experiments
+    GET  /experiments/{run_id}
+    GET  /experiments/{run_id}/report
+    DELETE /experiments/{run_id}
+    DELETE /experiments
+
     # System
     GET  /system/status
     GET  /system/audit
@@ -250,6 +260,22 @@ class NetworkCreateRequest(BaseModel):
     internal: bool = False
     plugin: str | None = None
     options: dict[str, str] = {}
+
+
+class DetonateRequest(BaseModel):
+    """Request body for ``POST /detonate``.
+
+    ``sample`` is a host-local path to the artifact to detonate (see the
+    endpoint docstring for the trust-domain caveat).
+    """
+
+    sample: str
+    image: str = "alpine:latest"
+    profile: str = "detonation"
+    name: str | None = None
+    command: list[str] | None = None
+    observe_seconds: float = 30.0
+    stats_interval: float = 2.0
 
 
 # ==========================================================================
@@ -1088,6 +1114,44 @@ async def topology_validate(req: TopologyValidateRequest) -> dict[str, Any]:
 
 
 # ==========================================================================
+# Detonation
+# ==========================================================================
+
+
+@app.post("/detonate")
+async def detonate(req: DetonateRequest) -> dict[str, Any]:
+    """Detonate a host-local sample in a disposable, isolated container.
+
+    Blocking call (roughly 30-90 s) running the full detonation loop:
+    policy gate, disposable internal network, sample delivery, observation
+    (stats sampled every ``stats_interval``), judge (Minos behavioral
+    report + risk score), persist (report artifact + store entry), destroy.
+
+    ``sample`` must be a path on the daemon host — the API shares the
+    daemon's trust domain, so the file is copied from the host filesystem
+    into the container.  Remote/URL samples are not accepted.
+
+    Returns the detonate result dict: ``run_id``, ``report``,
+    ``report_path``, ``artifacts``, ``risk_score``, ``exit_code``.  Failures
+    mid-loop raise ``DetonationError`` (400) with ``partial_evidence``; the
+    VM and disposable network are destroyed first (best-effort).
+    """
+    s = _get_state()
+    p = s["profiles"].get(req.profile)
+    kwargs = p.apply()
+    return await s["forge"].detonate(
+        req.sample,
+        image=req.image,
+        profile=req.profile,
+        name=req.name,
+        command=req.command,
+        observe_seconds=req.observe_seconds,
+        stats_interval=req.stats_interval,
+        profile_kwargs=kwargs,
+    )
+
+
+# ==========================================================================
 # Experiments (store manifests)
 # ==========================================================================
 
@@ -1105,6 +1169,25 @@ async def get_experiment(run_id: str) -> dict[str, Any]:
     if manifest is None:
         raise HTTPException(status_code=404, detail="experiment not found")
     return asdict(manifest)
+
+
+@app.get("/experiments/{run_id}/report")
+async def get_experiment_report(run_id: str) -> dict[str, Any]:
+    """Return the detonation behavioral report for an experiment.
+
+    Reads ``<store.root>/<run_id>.report.json``, written by
+    ``forge.detonate`` alongside the store manifest.  404 when the
+    experiment does not exist or the report artifact is missing.
+    """
+    s = _get_state()
+    manifest = s["store"].get(run_id)
+    if manifest is None:
+        raise HTTPException(status_code=404, detail="experiment not found")
+    path = os.path.join(s["store"].root, f"{run_id}.report.json")
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="report not found")
+    with open(path) as f:
+        return json.load(f)
 
 
 @app.delete("/experiments/{run_id}")

@@ -80,8 +80,9 @@ class TestStatsParser:
 class TestStatsSampleCpuPercent:
     def test_rate_between_two_samples(self) -> None:
         prev = StatsSample(id="x", cpu_usage_usec=0, sampled_at=0.0)
-        cur = StatsSample(id="x", cpu_usage_usec=5, sampled_at=100.0)
-        assert cur.cpu_percent(prev) == pytest.approx(5.0)
+        cur = StatsSample(id="x", cpu_usage_usec=500_000, sampled_at=1.0)
+        # 0.5 core-seconds of CPU over 1 s wall time = 50% of one core.
+        assert cur.cpu_percent(prev) == pytest.approx(50.0)
 
     def test_zero_time_delta_guard(self) -> None:
         prev = StatsSample(id="x", cpu_usage_usec=1000, sampled_at=10.0)

@@ -189,6 +189,7 @@ detonation, kernel experimentation, and network-deception research.
 
 Core capabilities:
 - Create and manage disposable Linux VMs via `daedalus_run`
+- Detonate a host-local sample and get a behavioral report + risk score via `daedalus_detonate`
 - Execute commands inside containers via `daedalus_exec`
 - Pull and manage OCI container images via `daedalus_image_*`
 - Sample resource usage via `daedalus_stats`
@@ -1903,6 +1904,97 @@ async def daedalus_profiles(ctx: Context) -> str:
         "dns": p.dns, "dns_domain": p.dns_domain,
         "tmpfs": p.tmpfs, "cpus": p.cpus, "memory": p.memory,
     } for p in profs])
+
+
+# ==========================================================================
+# Detonation
+# ==========================================================================
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Detonate a sample in an isolated VM and get a behavioral report",
+        readOnlyHint=False,
+        destructiveHint=True,
+        idempotentHint=False,
+        openWorldHint=True,
+    ),
+)
+async def daedalus_detonate(
+    sample: str,
+    image: str = "alpine:latest",
+    profile: str = "detonation",
+    name: str | None = None,
+    command: str | None = None,
+    observe_seconds: float = 30.0,
+    stats_interval: float = 2.0,
+    ctx: Context | None = None,
+) -> str:
+    """Detonate a host-local sample and get a behavioral report + risk score.
+
+    This is the safe-detention verb: DAEDALUS takes a sample path from
+    your host, delivers it into a disposable Labyrinth VM (policy-gated,
+    hardware-isolated), executes it while capturing filesystem and
+    resource-usage evidence, produces a behavioral report with a risk
+    score, then destroys the VM.  Nothing survives on the host except the
+    evidence (pre/post filesystem tars and the report in the store).
+
+    **WARNING**: Destructive and non-idempotent — a VM is created and
+    destroyed.  The call blocks until the observation window
+    (``observe_seconds``, default 30 s) elapses; an exec that runs past
+    the boundary reports exit code 124 (timeout), which is normal.
+    ``profile`` resolves via the built-in registry (detonation, bench,
+    isolated, fuzz, deception).  Pass ``command`` (space-separated argv,
+    e.g. "sh /tmp/sample.sh --flag") to override how the sample is
+    executed; by default it runs via ``sh``.
+
+    Returns {run_id, report, report_path, risk_score, exit_code} as JSON.
+    """
+    if not sample.strip():
+        return _err(ValidationError(
+            "sample path must be non-empty",
+            sample=sample,
+        ))
+    assert ctx is not None
+    dc = _get_ctx(ctx)
+    try:
+        p = dc.profiles.get(profile)
+        kwargs = p.apply()
+        argv = shlex.split(command) if command is not None else None
+        result = await dc.forge.detonate(
+            sample,
+            image=image,
+            profile=profile,
+            name=name,
+            command=argv,
+            observe_seconds=observe_seconds,
+            stats_interval=stats_interval,
+            profile_kwargs=kwargs,
+        )
+        payload = {
+            "run_id": result["run_id"],
+            "report": result["report"],
+            "report_path": result["report_path"],
+            "risk_score": result["risk_score"],
+            "exit_code": result["exit_code"],
+        }
+        _audit_agent(dc, "detonate", {
+            "sample": sample,
+            "image": image,
+            "profile": profile,
+            "name": name,
+            "command": argv,
+            "observe_seconds": observe_seconds,
+            "stats_interval": stats_interval,
+        }, payload)
+        return _ok(payload)
+    except DaedalusError as e:
+        _audit_agent(
+            dc, "detonate",
+            {"sample": sample, "image": image, "profile": profile},
+            error=e.message,
+        )
+        return _err(e)
 
 
 # ==========================================================================

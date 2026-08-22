@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from daedalus.core.backend import (
@@ -20,7 +22,7 @@ from daedalus.core.backend import (
     StatsSample,
 )
 from daedalus.core.capabilities import CapabilityManifest
-from daedalus.core.exceptions import PolicyViolationError, ValidationError
+from daedalus.core.exceptions import DetonationError, PolicyViolationError, ValidationError
 from daedalus.core.forge import DEFAULT_DETACHED_COMMAND, Forge, Labyrinth, SystemStatus
 from daedalus.core.policy import PolicyConfig, PolicyEngine
 from daedalus.core.store import Store
@@ -37,6 +39,9 @@ class MockBackend(Backend):
         self.containers: dict[str, ContainerInfo] = {}
         self.next_id = 1
         self.last_spec: RunSpec | None = None
+        # Flat call-order log — every verb stub appends its short name here
+        # so tests can assert the relative order of backend operations.
+        self.call_log: list[str] = []
         self.stats_calls: list[str | None] = []
         self.stats_result: list[StatsSample] = [
             StatsSample(
@@ -77,6 +82,7 @@ class MockBackend(Backend):
         return info
 
     async def run(self, spec: RunSpec) -> ContainerInfo:
+        self.call_log.append("run")
         self.last_spec = spec
         info = self._info(self._cid(), spec.name or "", spec.image, ContainerState.RUNNING)
         self.containers[info.id] = info
@@ -99,6 +105,7 @@ class MockBackend(Backend):
         *,
         signal: str | None = None,
     ) -> None:
+        self.call_log.append("stop")
         if container_id in self.containers:
             self.containers[container_id].state = ContainerState.STOPPED
 
@@ -107,6 +114,7 @@ class MockBackend(Backend):
             self.containers[container_id].state = ContainerState.STOPPED
 
     async def delete(self, container_id: str, force: bool = False) -> None:
+        self.call_log.append("delete")
         self.containers.pop(container_id, None)
 
     async def list(self, all: bool = False) -> list[ContainerInfo]:
@@ -120,8 +128,10 @@ class MockBackend(Backend):
         raise RuntimeError(f"container {container_id} not found")
 
     async def logs(self, container_id: str, **kwargs: object) -> str:
+        self.call_log.append("logs")
         return "mock logs\n"
     async def exec(self, container_id: str, argv: list[str], **opts: object) -> ExecResult:
+        self.call_log.append("exec")
         return ExecResult(0, f"mock: {' '.join(argv)}", "")
 
     # -- images --
@@ -200,15 +210,19 @@ class MockBackend(Backend):
 
     # -- stats / copy / export / prune / network (no-op canned stubs) --
     async def stats(self, container_id: str | None = None) -> list[StatsSample]:
+        self.call_log.append("stats")
         self.stats_calls.append(container_id)
         return list(self.stats_result)
     async def copy(self, source: str, destination: str) -> str:
+        self.call_log.append("copy")
         return destination
     async def export(self, container_id: str, output_path: str) -> str:
+        self.call_log.append("export")
         return output_path
     async def prune(self) -> PruneResult:
         return PruneResult()
     async def network_create(self, spec: NetworkSpec) -> NetworkInfo:
+        self.call_log.append("network_create")
         self.network_create_calls.append(spec)
         info = NetworkInfo(id=spec.name, name=spec.name, raw={"mock": True})
         self.networks[spec.name] = info
@@ -218,6 +232,7 @@ class MockBackend(Backend):
     async def network_inspect(self, name: str) -> NetworkInfo:
         return self.networks.get(name, NetworkInfo(id=name, name=name))
     async def network_delete(self, name: str) -> None:
+        self.call_log.append("network_delete")
         self.network_delete_calls.append(name)
         self.networks.pop(name, None)
 
@@ -466,3 +481,150 @@ class TestStats:
         samples = await forge.stats()
         assert samples == backend.stats_result
         assert backend.stats_calls == [None]
+
+
+# ------------------------------------------------------------------
+# Detonation loop tests (phase 3, W2)
+# ------------------------------------------------------------------
+
+
+class SlowExecMockBackend(MockBackend):
+    """MockBackend whose exec takes ~150ms so the stats sampler can fire."""
+
+    async def exec(self, container_id: str, argv: list[str], **opts: object) -> ExecResult:
+        self.call_log.append("exec")
+        await asyncio.sleep(0.15)
+        return ExecResult(0, f"mock: {' '.join(argv)}", "")
+
+
+class TestDetonate:
+    @staticmethod
+    def _sample_file(tmp_path) -> str:
+        sample = tmp_path / "sample.sh"
+        sample.write_bytes(b"#!/bin/sh\nexit 0\n")
+        return str(sample)
+
+    @staticmethod
+    def _assert_relative_order(call_log: list[str], verbs: list[str]) -> None:
+        """Assert verbs appear in call_log in the given relative order.
+
+        Duplicate verbs resolve to successive occurrences (e.g. both
+        exports), and unrelated calls (stop, stats) may interleave.
+        """
+        pos = -1
+        for verb in verbs:
+            pos = next(i for i, c in enumerate(call_log) if c == verb and i > pos)
+
+    async def test_detonate_orders_the_loop(
+        self, caps: CapabilityManifest, tmp_path,
+    ):
+        backend = SlowExecMockBackend()
+        forge = Forge(
+            backend, caps,
+            store=Store(root=str(tmp_path / "store")),
+        )
+        result = await forge.detonate(
+            self._sample_file(tmp_path),
+            observe_seconds=5.0,
+            stats_interval=0.05,  # sampler fires while exec is slow
+        )
+        assert result["run_id"]
+        self._assert_relative_order(backend.call_log, [
+            "network_create", "run", "export", "copy", "exec",
+            "logs", "export", "delete", "network_delete",
+        ])
+        # Stats sampled while the sample exec runs: present, between exec
+        # and the detonation logs (not positionally asserted beyond that).
+        assert "stats" in backend.call_log
+        exec_idx = backend.call_log.index("exec")
+        first_stats = backend.call_log.index("stats")
+        first_logs = backend.call_log.index("logs")
+        assert exec_idx < first_stats < first_logs
+        assert backend.call_log[-1] == "network_delete"
+
+    async def test_detonate_returns_report_with_fs_changes(
+        self, caps: CapabilityManifest, tmp_path,
+    ):
+        store = Store(root=str(tmp_path / "store"))
+        backend = MockBackend()
+        forge = Forge(backend, caps, store=store)
+        sample = self._sample_file(tmp_path)
+        result = await forge.detonate(sample, observe_seconds=5.0)
+        # Mock export writes no real tars → pre/post paths don't exist →
+        # Minos sees an empty diff; orchestration-level, real diff belongs
+        # to test_minos.
+        assert result["run_id"]
+        assert result["report"]["run_id"] == result["run_id"]
+        assert result["report"]["filesystem"]["total_changes"] == 0
+        assert "risk_score" in result
+        assert result["report_path"].endswith(f"{result['run_id']}.report.json")
+        assert result["report_path"] in result["artifacts"]
+        assert result["exit_code"] == 0
+
+        manifest = store.get(result["run_id"])
+        assert manifest is not None
+        # One artifact entry per evidence path (Store.add_artifact dedupes
+        # by path — icarus's generic export registration and detonate's
+        # pre/post registrations point at the same files).
+        paths = {a.path for a in manifest.artifacts}
+        assert result["report_path"] in paths
+        assert any(p.endswith(".pre.tar") for p in paths)
+        assert any(p.endswith(".post.tar") for p in paths)
+
+        entries = forge._audit.query(operation="detonate")
+        assert len(entries) == 1
+        entry = entries[0]
+        assert entry.actor == "forge"
+        assert entry.args["sample"] == sample
+        assert entry.args["profile"] == "detonation"
+        assert entry.result["run_id"] == result["run_id"]
+        assert entry.result["risk_score"] == result["risk_score"]
+        assert entry.result["fs_changes"] == 0
+
+    async def test_detonate_failure_destroys_and_cleans(
+        self, caps: CapabilityManifest, tmp_path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        store = Store(root=str(tmp_path / "store"))
+        backend = MockBackend()
+        forge = Forge(backend, caps, store=store)
+
+        async def _boom(container_id: str, argv: list[str], **opts: object) -> None:
+            backend.call_log.append("exec")
+            raise RuntimeError("sample crashed")
+
+        monkeypatch.setattr(backend, "exec", _boom)
+        with pytest.raises(DetonationError) as ei:
+            await forge.detonate(self._sample_file(tmp_path))
+        exc = ei.value
+        assert exc.code == "DETONATION_ERROR"
+        assert isinstance(exc.__cause__, RuntimeError)
+        # Partial evidence: the pre-export landed, post-export/report did not.
+        assert "pre_tar" in exc.partial_evidence
+        assert "post_tar" not in exc.partial_evidence
+        assert "report_path" not in exc.partial_evidence
+        # Cleanup: destroy then disposable network delete, no network leak.
+        assert backend.call_log[-2:] == ["delete", "network_delete"]
+        assert backend.network_delete_calls
+
+        manifest = store.list()[0]
+        names = {a.name for a in manifest.artifacts}
+        # Only what was actually written before the failure (plus the
+        # best-effort destroy's own report artifact).
+        assert "report.json" not in names
+        assert "filesystem.post.tar" not in names
+
+    async def test_detonate_reuses_existing_network(
+        self, caps: CapabilityManifest, tmp_path,
+    ):
+        backend = MockBackend()
+        forge = Forge(
+            backend, caps,
+            store=Store(root=str(tmp_path / "store")),
+        )
+        await forge.detonate(
+            self._sample_file(tmp_path), network_name="preexisting",
+        )
+        # Provided network is reused: no create, delete still attempted.
+        assert "network_create" not in backend.call_log
+        assert backend.call_log[-1] == "network_delete"
+        assert backend.network_delete_calls == ["preexisting"]

@@ -159,6 +159,11 @@ class Store:
     def add_artifact(self, run_id: str, artifact: Artifact) -> None:
         manifest = self.get(run_id)
         if manifest:
+            # Dedupe by path: several engine paths (icarus export, forge
+            # detonate, destroy) legitimately re-register the same evidence
+            # file under different names; keep one entry per path.
+            if any(a.path == artifact.path for a in manifest.artifacts):
+                return
             manifest.artifacts.append(artifact)
             self._persist(manifest)
 

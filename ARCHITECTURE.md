@@ -269,15 +269,30 @@ data, but that is opt-in per policy.
 
 ## 5. Reference workflows (what the platform is *for*)
 
-### 5.1 Malware detonation (the flagship)
-1. `policy` check (quota, disk, image allow-list). 2. `talos` creates an `--internal` network, no
-host route, custom `--dns` → controlled resolver (fake internet). 3. `ariadne` selects an
-init-image with eBPF (syscall+net+file) and optionally a chosen kernel. 4. `forge` runs the sample
-container with the `detonation` profile (`--cap-drop ALL --read-only`), detached, `--rm`-disabled
-so FS can be exported. 5. `icarus` drops the sample (`cp`), executes it (`exec`), captures `logs`.
-6. on completion `forge` stops; `icarus` `export`s the FS tar. 7. `minos` diffs pre/post FS,
-folds in ariadne telemetry + `stats` fingerprint + boot log → behavioral report + score.
-8. `forge` destroys the VM. Entire run recorded in `audit`/`store` for reproducibility.
+### 5.1 Malware detonation (the flagship) — **implemented**
+
+`Forge.detonate(sample, *, image, profile, name, command, observe_seconds, stats_interval, network_name, profile_kwargs)` (`daedalus/core/forge.py`, SPEC phase 3 §3.2) is the orchestrated loop, surfaced by the CLI `detonate`, the API `POST /detonate`, the MCP `daedalus_detonate`, and the Experiments UI report viewer. The loop:
+
+1. **policy** gate — concurrency / disk / image, the same `_check_run` as `run`/`create`.
+2. **isolation** — `talos` creates a disposable `--internal` network (`daedalus-detonation-<run>`; `network_name=` reuses an existing one). DNS is fully blocked (the `detonation` profile's `no_dns`).
+3. **run** the VM detached with a keep-alive command (NOT the sample yet).
+4. **baseline** — `icarus.export_fs` the pre-run FS to `<store>/<run_id>.pre.tar` (works on the running VM).
+5. **deliver** — `icarus.copy_to` the sample to `/root/sample<ext>`, preserving its extension.
+6. **detonate + observe** — `icarus.exec` runs `sh /root/sample…` (or an explicit `command`) while a sampler collects `forge.stats` every `stats_interval` s until exec completes or `observe_seconds` elapses.
+7. **post-evidence** — boot + process logs, then the post-run export `<store>/<run_id>.post.tar`.
+8. **judge** — `minos.analyze` diffs pre/post FS, folds in the stats snapshots + logs → `BehavioralReport` + risk score; persisted as `<store>/<run_id>.report.json`, store artifacts, and an `audit` entry.
+9. **destroy** — `forge.destroy(run_id, confirm=True, report=<the rich report>)`; the disposable network is deleted in a `finally`. Failures mid-loop destroy the VM and network (best-effort) and re-raise `DetonationError` carrying `partial_evidence`.
+
+**Design decision — no tmpfs, samples land in `/root`:** the `detonation` profile deliberately
+carries **no tmpfs**. A tmpfs `/tmp` would shadow the disk layer there (a copied sample would be
+invisible to `exec`) *and* hide runtime writes to `/tmp` from the post-run export — which would
+blind the filesystem-delta evidence that is the whole point of the report. Samples are delivered
+to `/root` for the same reason, so a dropper's runtime writes (e.g. `/root/dropped.txt`) land in
+the diff. The VM is destroyed after analysis, so anti-persistence is moot.
+
+The aspirational v1 sketch above differs in three ways that stay gated: ariadne's eBPF
+init-image (`--init-image` absent in container 1.2.2), `--cap-drop ALL`/`--read-only` (phase 4
+profile hardening), and a fake-DNS resolver (the profile currently blocks DNS outright).
 
 ### 5.2 Kernel fuzzing / escape research
 `ariadne` boots a KASAN/KCOV/syzkaller-instrumented kernel (`-k`) per VM; `forge` runs disposable
@@ -407,6 +422,7 @@ that release; anything still gated lives in the "container 1.2.2 reality" note b
 | machina | machine create/list/inspect/set/set-default/stop/delete/run/logs — persistent stateful VMs with init-capability advisor (name heuristic + log check) and confirm-gated delete | CLI, API, MCP |
 | talos | DNS control (`--dns`, `--dns-domain`, `--dns-search`, `--no-dns`), system DNS (create/delete/list) | CLI, API, MCP |
 | forge | prune — stop + reclaim disk via `container prune` | CLI, API, MCP |
+| forge | detonate — the full orchestrated loop (policy gate → disposable internal network → pre/post FS export diff → sample delivery to /root → exec + stats sampling → Minos report + risk score → store artifacts + audit → destroy). §5.1, SPEC phase 3 | CLI, API, MCP |
 | profiles | detonation, bench, fuzz, isolated, deception | CLI, API, MCP |
 | policy | concurrency, disk, image allow/block-list, confirm gates (destroy, network delete, network expose, kernel) | Engine |
 | audit | append-only, checksummed JSONL audit log | Engine |
@@ -423,7 +439,7 @@ subsystem (create/list/inspect/set/set-default/stop/delete/run/logs, phase 2): m
 alpine/debian/ubuntu images will not boot (daedalus warns via the advisor and explains failures
 from the boot logs); machine **backing containers are hidden by the CLI** (the daemon's
 `container list` never shows them), and `container prune` does not touch machines.  The CLI also
-ships `volume` and a `k8s` plugin — these exist but are **not yet wrapped** by daedalus (phase 3).
+ships `volume` and a `k8s` plugin — these exist but are **not yet wrapped** by daedalus.
 Run/create flags beyond the RunSpec extension (`--rosetta`, `--virtualization`, `--init-image`,
 `--publish-socket`, `--shm-size`, `--ulimit`) are present in 1.2.2 but not yet serialised (the
 machine `--virtualization` flag *is* serialised on `MachineCreateSpec`); per-container kernels
@@ -433,11 +449,12 @@ machine `--virtualization` flag *is* serialised on `MachineCreateSpec`); per-con
 
 ```
 mypy --strict daedalus/     → Success: no issues found in 24 source files
-pytest tests/               → 225 passed, 1 skipped (205 unit + 20 integration; the slow systemd machine-boot test skips on the container 1.2.2 exec limitation, upstream apple/container#1669)
+pytest tests/               → 236 passed, 1 skipped (214 unit + 22 integration; the slow systemd machine-boot test skips on the container 1.2.2 exec limitation, upstream apple/container#1669)
+Detonation §M7 test         → 2 live detonations: dropper vs no-op reports distinguishable, no VM/network leaks (tests/integration/test_detonation.py)
 Import-time I/O             → zero subprocess calls
-MCP (stdio)                 → 51 tools, handshake verified
+MCP (stdio)                 → 61 tools, handshake verified
 MCP (cartograph federation) → discover + call verified
-API (FastAPI)               → /health, /stats, /networks, /containers, /images, /profiles, /system/status
+API (FastAPI)               → /health, /stats, /networks, /containers, /images, /profiles, /system/status, /detonate, /experiments
 ```
 
 ---

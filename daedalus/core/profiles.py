@@ -78,9 +78,12 @@ BUILTIN_PROFILES: dict[str, Profile] = {
         name="detonation",
         description=(
             "Maximum lockdown for safe malware detonation. "
-            "DNS fully blocked, tmpfs for /tmp and /var/tmp."
+            "DNS fully blocked."
         ),
-        tmpfs=["/tmp", "/var/tmp"],
+        # NOTE: no tmpfs here.  tmpfs on /tmp makes runtime drops invisible
+        # to the post-run export (tmpfs writes never reach the disk layer),
+        # which blinds the filesystem-delta evidence in behavioral reports —
+        # and the VM is destroyed after analysis, so anti-persistence is moot.
         no_dns=True,
     ),
 
