@@ -1,7 +1,8 @@
 import { useSystemStatus, useBuilderStatus, useSystemRestart } from '../api/system'
-import { useContainers, useStats, useCpuPercentMap } from '../api/containers'
+import { useContainers, useStats, useCpuPercentMap, useStatsHistory, type StatsRate } from '../api/containers'
 import { useImages, usePruneImages } from '../api/images'
 import { Box, GlassBox, StatCard, Badge } from './shared'
+import Sparkline from './Sparkline'
 
 export default function Dashboard() {
   const { data: status } = useSystemStatus()
@@ -10,6 +11,8 @@ export default function Dashboard() {
   const { data: images, isLoading: loadingImages } = useImages()
   const { data: stats } = useStats()
   const cpuMap = useCpuPercentMap(stats)
+  const history = useStatsHistory(180)
+  const { cpu: cpuSeries, memory: memSeries } = sparkSeries(history.data?.samples)
   const prune = usePruneImages()
   const restart = useSystemRestart()
 
@@ -37,8 +40,14 @@ export default function Dashboard() {
         <StatCard label="Running" value={loadingContainers ? '...' : String(running)} color="var(--success)" />
         <StatCard label="Stopped" value={loadingContainers ? '...' : String(stopped)} color="var(--muted-fg)" />
         <StatCard label="Images" value={loadingImages ? '...' : String(images?.length ?? 0)} />
-        <StatCard label="Container Memory" value={stats ? formatBytes(memUsed) : '...'} color="#3b82f6" />
-        <StatCard label="Container CPU" value={stats ? cpuPct.toFixed(0) + '%' : '...'} color="#3b82f6" />
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6 }}>
+          <StatCard label="Container Memory" value={stats ? formatBytes(memUsed) : '...'} color="#3b82f6" />
+          <Sparkline values={memSeries} width={96} height={22} color="#3b82f6" />
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6 }}>
+          <StatCard label="Container CPU" value={stats ? cpuPct.toFixed(0) + '%' : '...'} color="#3b82f6" />
+          <Sparkline values={cpuSeries} width={96} height={22} color="#3b82f6" />
+        </div>
         <StatCard label="Sampled Containers" value={stats ? String(stats.length) : '...'} color="var(--muted-fg)" />
       </div>
 
@@ -129,4 +138,41 @@ function formatBytes(b: number): string {
   if (b > 1e9) return (b / 1e9).toFixed(1) + ' GB'
   if (b > 1e6) return (b / 1e6).toFixed(1) + ' MB'
   return b.toLocaleString() + ' B'
+}
+
+/**
+ * Fold the merged history list (all ids, sorted by monotonic ``at``) into
+ * two dashboard series: per time bucket, ``cpu`` = max cpu_percent across
+ * ids (the busiest container at that tick) and ``memory`` = sum of the
+ * last memory_bytes per id (total footprint).  Buckets are ``at`` rounded
+ * to 0.1 s — samples arrive at a 2 s cadence, so the rounding only
+ * absorbs float jitter between ids in the merged list.
+ */
+function sparkSeries(samples: StatsRate[] | undefined): { cpu: number[]; memory: number[] } {
+  const cpu: number[] = []
+  const memory: number[] = []
+  if (!samples || samples.length === 0) return { cpu, memory }
+
+  const byBucket = new Map<number, Map<string, StatsRate>>()
+  for (const s of samples) {
+    const b = Math.round(s.at * 10) / 10
+    let byId = byBucket.get(b)
+    if (!byId) {
+      byId = new Map()
+      byBucket.set(b, byId)
+    }
+    byId.set(s.id, s) // last sample per id within the bucket wins
+  }
+
+  for (const b of [...byBucket.keys()].sort((a, b2) => a - b2)) {
+    let maxCpu = 0
+    let mem = 0
+    for (const s of byBucket.get(b)!.values()) {
+      maxCpu = Math.max(maxCpu, s.cpu_percent)
+      mem += s.memory_bytes
+    }
+    cpu.push(maxCpu)
+    memory.push(mem)
+  }
+  return { cpu, memory }
 }

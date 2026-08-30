@@ -411,7 +411,7 @@ Containerization/XPC. Behind capability flags. *Test:* same `Backend` contract t
 
 ## 9. Implementation status vs container 1.3.1
 
-The DAEDALUS control plane is fully implemented (Python, 24 modules, mypy strict,
+The DAEDALUS control plane is fully implemented (Python, 26 modules, mypy strict,
 MCP + API + CLI surfaces).  The host runs container CLI **1.3.1** (commit `a9a62e2`) — the
 security release that fixed the six GHSA advisories the detonation workflow depends on
 (bundle file-deletion via unchecked ids, OCI descriptor path traversal, symlink reads on image
@@ -425,6 +425,7 @@ anything still gated lives in the "container reality" note below.
 |---|---|---|
 | forge | create, run, start, stop, kill, delete, list, inspect, logs | CLI, API, MCP |
 | forge | stats — one-shot CPU/mem/net/block/proc samples (`stats --no-stream --format json`), sampled in `StatsSample.sampled_at` for later rate derivation | CLI, API, MCP |
+| sampling | stats observation engine (SPEC phase 5) — `StatsSampler` 2 s cadence, two-tick CPU%/delta rate derivation, per-container history ring (300 pts ≈ 10 min), `~/.daedalus/store/stats-history.json` persistence (save every 10 ticks, load on boot), SSE `/stats/stream` + `/stats/history` API; process-wide `get_sampler` singleton shared with `Forge.detonate` (its raw evidence loop runs alongside so detonation stats land in the global ring) | API, UI |
 | forge (RunSpec) | `--network <name>`, `-p/--publish` (repeatable), `--cap-add`, `--cap-drop`, `--read-only`, `--init-image`, `--ssh` serialised by `RunSpec.to_cli_args()` | CLI, API, MCP |
 | icarus | exec (no `--` separator), logs (boot + stdio) | CLI, API, MCP |
 | icarus | copy — `copy_from`/`copy_to` (bidirectional, `id:` prefix built in code), byte-identical round-trip | CLI, API, MCP |
@@ -450,7 +451,10 @@ subsystem (create/list/inspect/set/set-default/stop/delete/run/logs, phase 2): m
 **init-capable images** — the machine boots the image's own `/sbin/init` as PID 1, so plain
 alpine/debian/ubuntu images will not boot (daedalus warns via the advisor and explains failures
 from the boot logs); machine **backing containers are hidden by the CLI** (the daemon's
-`container list` never shows them), and `container prune` does not touch machines.  The CLI also
+`container list` never shows them), and `container prune` does not touch machines.  Machine
+**live-stats are runtime-gated** for the same reason: the daemon hides machine backing
+containers from `stats` too, so the sampling engine cannot re-key per-machine CPU/memory
+history — a SPEC phase 5 non-goal, documented rather than worked around.  The CLI also
 ships a `k8s` plugin — it exists but is **not yet wrapped** by daedalus.
 Run/create flags beyond the RunSpec extension (`--rosetta`, `--virtualization`,
 `--publish-socket`, `--shm-size`, `--ulimit`) are present but not yet serialised (the machine
@@ -463,13 +467,13 @@ unblocked.  Registry scheme is `--scheme http|https` only — **`auto` was remov
 ### Quality gates (all passing)
 
 ```
-mypy --strict daedalus/     → Success: no issues found in 25 source files
-pytest tests/               → 289 passed, 1 skipped (267 unit + 22 integration; the slow systemd machine-boot test skips on the container exec limitation, upstream apple/container#1669)
+mypy --strict daedalus/     → Success: no issues found in 26 source files
+pytest tests/               → 311 passed, 1 skipped (286 unit + 25 integration; the slow systemd machine-boot test skips on the container exec limitation, upstream apple/container#1669)
 Detonation §M7 test         → 2 live detonations: dropper vs no-op reports distinguishable, no VM/network leaks (tests/integration/test_detonation.py)
 Import-time I/O             → zero subprocess calls
 MCP (stdio)                 → 61 tools, handshake verified
 MCP (cartograph federation) → discover + call verified
-API (FastAPI)               → /health, /stats, /networks, /containers, /images, /profiles, /system/status, /detonate, /experiments
+API (FastAPI)               → /health, /stats, /stats/history, /stats/stream, /networks, /containers, /images, /profiles, /system/status, /detonate, /experiments
 ```
 
 ---

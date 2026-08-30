@@ -38,6 +38,7 @@ from daedalus.core.exceptions import (
 )
 from daedalus.core.icarus import ExecOptions, Icarus
 from daedalus.core.minos import BehavioralReport, Minos, stats_samples_to_snapshots
+from daedalus.core.sampling import get_sampler
 from daedalus.core.talos import Talos
 
 # Detached with no command: image defaults exit immediately in the background.
@@ -396,6 +397,16 @@ class Forge:
         blind the filesystem-delta evidence that is the whole point of the
         report.
 
+        **Stats evidence path**: the inline raw ``StatsSample`` loop below
+        remains the *evidence* source — minos's
+        ``stats_samples_to_snapshots`` consumes cumulative raw samples
+        with pairwise ``cpu_percent``, which two-tick derived rates cannot
+        reproduce.  The shared per-process ``StatsSampler``
+        (``get_sampler``) runs *alongside* it for the observation window
+        so the run's stats also land in the global history ring (the live
+        UI spine); it is started before the exec and stopped in the
+        ``finally`` when the exec completes (phase 5, W1).
+
         Returns
         -------
         dict with ``run_id``, ``report`` (``BehavioralReport.to_dict()``),
@@ -485,6 +496,11 @@ class Forge:
 
             # Step 6 — detonate + observe concurrently: exec the sample while
             # a sampler drains stats into ``samples`` until exec completes.
+            # The shared per-process StatsSampler also runs (started before
+            # the exec, stopped in the finally below) so the run's stats land
+            # in the global history ring — see the method docstring for why
+            # it is NOT the evidence source.
+            get_sampler(self._backend).start()
             sample_cmd = command or ["sh", dest]
             samples: list[StatsSample] = []
             exec_task = asyncio.create_task(
@@ -508,6 +524,7 @@ class Forge:
                 sampler_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await sampler_task
+                get_sampler(self._backend).stop()
 
             # Step 7 — post-evidence: boot + process logs, post-export.
             boot_log = await icarus.logs(run_id, boot=True)

@@ -21,6 +21,8 @@ Endpoints::
     POST /containers/{id}/export
     POST /containers/prune
     GET  /stats
+    GET  /stats/history
+    GET  /stats/stream               (SSE)
 
     # Networks
     GET  /networks
@@ -109,6 +111,7 @@ from daedalus.core.machina import Machina
 from daedalus.core.mint import Mint
 from daedalus.core.policy import PolicyEngine, PolicyResult, load_policy_config
 from daedalus.core.profiles import ProfileRegistry
+from daedalus.core.sampling import StatsSampler, get_sampler
 from daedalus.core.store import Store
 from daedalus.core.talos import Talos
 from daedalus.core.volume import Volumes
@@ -335,6 +338,13 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
     policy.config.on_decision = _policy_audit
 
+    # Stats sampler: the process-shared sampling loop owns the history
+    # ring behind /stats/history and /stats/stream for the server's whole
+    # lifetime (a detonate run stops it — the endpoint restarts it on
+    # return).
+    sampler = get_sampler(backend)
+    sampler.start()
+
     _state.update({
         "caps": caps,
         "backend": backend,
@@ -347,9 +357,13 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         "profiles": ProfileRegistry(),
         "audit": audit,
         "store": store,
+        "sampler": sampler,
         "initialised": True,
     })
-    yield
+    try:
+        yield
+    finally:
+        sampler.stop()
 
 
 app = FastAPI(
@@ -761,6 +775,72 @@ async def container_stats(container_id: str) -> list[dict[str, Any]]:
     s = _get_state()
     samples = await s["forge"].stats(container_id)
     return [sample.to_dict() for sample in samples]
+
+
+@app.get("/stats/history")
+async def stats_history(
+    seconds: float = Query(120.0),
+    container_id: str | None = Query(None),
+) -> dict[str, Any]:
+    """Trailing stats history from the shared sampler (derived rates).
+
+    With ``container_id``, only that container's series; without, every
+    container's series merged into one list sorted by ``at`` (each rate
+    dict carries its ``id``).  ``seconds`` windows the trailing history
+    on the monotonic ``at`` timestamps.
+    """
+    s = _get_state()
+    sampler: StatsSampler = s["sampler"]
+    # The sampler's public surface is frozen by the phase-5 W2 scope
+    # (only ``is_running`` was added); id enumeration goes through the
+    # history ring directly.
+    history_ids = sampler._history.ids()
+    if container_id is not None:
+        ids = [cid for cid in history_ids if cid == container_id]
+        samples = [rate.to_dict() for rate in sampler.series(container_id, seconds)]
+    else:
+        ids = history_ids
+        samples = [
+            rate.to_dict()
+            for cid in ids
+            for rate in sampler.series(cid, seconds)
+        ]
+        samples.sort(key=lambda d: d["at"])
+    return {"samples": samples, "ids": ids}
+
+
+@app.get("/stats/stream")
+async def stats_stream(request: Request) -> StreamingResponse:
+    """SSE stream of the newest stats rate per container.
+
+    Yields an ``event: sample`` every 2 s carrying a JSON list of the
+    newest rate per container id (never the full history — payloads stay
+    small); mirrors the ``/system/events`` streaming pattern.
+    """
+    s = _get_state()
+
+    async def event_stream() -> AsyncIterator[str]:
+        yield ": connected\n\n"
+        while True:
+            if await request.is_disconnected():
+                break
+            try:
+                sampler: StatsSampler = s["sampler"]
+                newest: list[dict[str, Any]] = []
+                for cid in sampler._history.ids():
+                    rates = sampler.series(cid)
+                    if rates:
+                        newest.append(rates[-1].to_dict())
+                yield f"event: sample\ndata: {json.dumps(newest)}\n\n"
+            except Exception:
+                pass
+            await asyncio.sleep(2)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+    )
 
 
 @app.post("/containers/{container_id}/copy")
@@ -1215,16 +1295,23 @@ async def detonate(req: DetonateRequest) -> dict[str, Any]:
     s = _get_state()
     p = s["profiles"].get(req.profile)
     kwargs = p.apply()
-    return await s["forge"].detonate(
-        req.sample,
-        image=req.image,
-        profile=req.profile,
-        name=req.name,
-        command=req.command,
-        observe_seconds=req.observe_seconds,
-        stats_interval=req.stats_interval,
-        profile_kwargs=kwargs,
-    )
+    try:
+        return await s["forge"].detonate(
+            req.sample,
+            image=req.image,
+            profile=req.profile,
+            name=req.name,
+            command=req.command,
+            observe_seconds=req.observe_seconds,
+            stats_interval=req.stats_interval,
+            profile_kwargs=kwargs,
+        )
+    finally:
+        # forge.detonate stops the process-shared sampler around the
+        # run; restart it so the API keeps sampling after it returns.
+        sampler = s.get("sampler")
+        if sampler is not None and not sampler.is_running:
+            sampler.start()
 
 
 # ==========================================================================

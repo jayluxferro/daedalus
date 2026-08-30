@@ -1,7 +1,8 @@
-import { useState } from 'react'
-import { useContainers, useRunContainer, useStartContainer, useStopContainer, useDestroyContainer, useKillContainer, useInspectContainer, useStats, useExportFs, usePruneContainers, useCpuPercentMap } from '../api/containers'
+import { useState, useMemo } from 'react'
+import { useContainers, useRunContainer, useStartContainer, useStopContainer, useDestroyContainer, useKillContainer, useInspectContainer, useStats, useExportFs, usePruneContainers, useCpuPercentMap, useStatsHistory } from '../api/containers'
 import { useProfiles } from '../api/system'
 import { Box, GlassBox, Badge, StatCard, Modal } from './shared'
+import Sparkline from './Sparkline'
 
 const input: React.CSSProperties = { width: '100%', padding: '6px 10px', borderRadius: 6, border: '1px solid var(--border)', background: '#0f0f13', color: 'var(--fg)', fontSize: 13, boxSizing: 'border-box' }
 const selectStyle: React.CSSProperties = { ...input, appearance: 'none', WebkitAppearance: 'none', backgroundImage: 'url("data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 width=%2712%27 height=%2712%27 viewBox=%270 0 12 12%27%3E%3Cpath fill=%27%2371717a%27 d=%27M3 4.5l3 3 3-3%27/%3E%3C/svg%3E")', backgroundRepeat: 'no-repeat', backgroundPosition: 'right 8px center', paddingRight: 28 }
@@ -21,6 +22,23 @@ export default function ContainersView({ onOpenTerminal }: { onOpenTerminal?: (i
   const { data: stats } = useStats()
   const cpuMap = useCpuPercentMap(stats)
   const statsById = new Map((stats || []).map(s => [s.id, s]))
+  // One merged history fetch (all ids) — slice per id client-side to
+  // avoid N requests per row.  The merged list is sorted by ``at``, so
+  // appending per id preserves oldest→newest order.
+  const history = useStatsHistory(120)
+  const historyById = useMemo(() => {
+    const cpu = new Map<string, number[]>()
+    const memory = new Map<string, number[]>()
+    for (const s of history.data?.samples ?? []) {
+      let c = cpu.get(s.id)
+      if (!c) { c = []; cpu.set(s.id, c) }
+      c.push(s.cpu_percent)
+      let m = memory.get(s.id)
+      if (!m) { m = []; memory.set(s.id, m) }
+      m.push(s.memory_bytes)
+    }
+    return { cpu, memory }
+  }, [history.data?.samples])
   const prune = usePruneContainers()
   const [filter, setFilter] = useState('all')
   const [search, setSearch] = useState('')
@@ -111,7 +129,8 @@ export default function ContainersView({ onOpenTerminal }: { onOpenTerminal?: (i
             )}
             {items.map(c => (
               <ContainerRow key={c.id} container={c} onInspect={setInspectId} onOpenTerminal={onOpenTerminal}
-                cpuPct={cpuMap[c.id]} memUsage={statsById.get(c.id)?.memory_usage_bytes} memLimit={statsById.get(c.id)?.memory_limit_bytes} />
+                cpuPct={cpuMap[c.id]} memUsage={statsById.get(c.id)?.memory_usage_bytes} memLimit={statsById.get(c.id)?.memory_limit_bytes}
+                cpuHistory={historyById.cpu.get(c.id) ?? []} memHistory={historyById.memory.get(c.id) ?? []} />
             ))}
           </tbody>
         </table>
@@ -128,13 +147,15 @@ export default function ContainersView({ onOpenTerminal }: { onOpenTerminal?: (i
   )
 }
 
-function ContainerRow({ container: c, onInspect, onOpenTerminal, cpuPct, memUsage, memLimit }: {
+function ContainerRow({ container: c, onInspect, onOpenTerminal, cpuPct, memUsage, memLimit, cpuHistory, memHistory }: {
   container: { id: string; name: string; image: string; state: string; profile: string; ip?: string | null }
   onInspect: (id: string) => void
   onOpenTerminal?: (id: string) => void
   cpuPct?: number
   memUsage?: number
   memLimit?: number
+  cpuHistory: number[]
+  memHistory: number[]
 }) {
   const start = useStartContainer()
   const stop = useStopContainer()
@@ -166,9 +187,11 @@ function ContainerRow({ container: c, onInspect, onOpenTerminal, cpuPct, memUsag
       <td style={{ padding: 8, fontSize: 12 }}>{c.profile}</td>
       <td style={{ padding: 8, fontSize: 12, fontVariantNumeric: 'tabular-nums' }}>
         {cpuPct !== undefined ? cpuPct.toFixed(1) + '%' : '—'}
+        {running && <div style={{ marginTop: 4 }}><Sparkline values={cpuHistory} /></div>}
       </td>
       <td style={{ padding: 8, fontSize: 11, color: 'var(--muted-fg)', fontVariantNumeric: 'tabular-nums' }}>
         {memUsage !== undefined ? formatBytes(memUsage) + (memLimit ? ' / ' + formatBytes(memLimit) : '') : '—'}
+        {running && <div style={{ marginTop: 4 }}><Sparkline values={memHistory} color="#3b82f6" /></div>}
       </td>
       <td style={{ padding: 8 }}>
         <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>

@@ -137,6 +137,49 @@ export function useCpuPercentMap(stats: StatsSample[] | undefined): Record<strin
   return cpu
 }
 
+// ---------------------------------------------------------------------------
+// Stats history (phase 5 sampling engine)
+// ---------------------------------------------------------------------------
+
+/** A derived two-tick rate sample from the shared sampler (2 s cadence). */
+export interface StatsRate {
+  id: string
+  cpu_percent: number        // derived rate, clamped 0..100
+  memory_bytes: number
+  memory_limit_bytes: number
+  net_rx_delta: number
+  net_tx_delta: number
+  block_r_delta: number
+  block_w_delta: number
+  num_processes: number
+  at: number                 // time.monotonic() — opaque ordering key
+}
+
+export interface StatsHistoryResponse {
+  samples: StatsRate[]
+  ids: string[]
+}
+
+/**
+ * Trailing derived-rate history.  With ``containerId`` the server returns
+ * only that container's series (oldest→newest); without, every
+ * container's series merged into one list sorted by ``at`` (each sample
+ * carries its ``id``).
+ */
+export function getStatsHistory(seconds = 120, containerId?: string) {
+  const params = new URLSearchParams({ seconds: String(seconds) })
+  if (containerId) params.set('container_id', containerId)
+  return apiGet<StatsHistoryResponse>(`/stats/history?${params.toString()}`)
+}
+
+export function useStatsHistory(seconds = 120, containerId?: string) {
+  return useQuery({
+    queryKey: containerId ? ['stats-history', seconds, containerId] : ['stats-history', seconds],
+    queryFn: () => getStatsHistory(seconds, containerId),
+    refetchInterval: 5000,
+  })
+}
+
 export type CopyDirection = 'from' | 'to'
 
 export interface CopyResult {

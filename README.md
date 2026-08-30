@@ -103,6 +103,8 @@ daedalus run alpine:latest -d --command "echo hello from daedalus"
 # 7. See it
 daedalus ls --all
 daedalus stats                        # live CPU/mem/net stats for running containers
+                                       # a 2 s rolling history is served by the API server
+                                       # (/stats/history, SSE /stats/stream — see below)
 
 # 8. Machines (persistent stateful VMs — init-capable image required)
 daedalus machine create alpine:latest --no-boot -n test-m   # will warn: alpine has no init system
@@ -251,6 +253,8 @@ python -m daedalus.api.server
 | DELETE | `/containers/{id}` | Destroy (`?confirm=true` required) |
 | GET | `/stats` | One-shot stats for all running containers |
 | GET | `/containers/{id}/stats` | One-shot stats for one container |
+| GET | `/stats/history` | Trailing stats-history window from the sampling engine (`?seconds=120`, optional `?container_id=`) |
+| GET | `/stats/stream` | SSE stream of the newest stats rate per container (every 2 s) |
 | POST | `/containers/{id}/copy` | Copy to/from container (`{"source","destination","direction"}`) |
 | POST | `/containers/{id}/export` | Export FS to tar (`{"output_path"?}`) |
 | POST | `/containers/prune` | Remove stopped containers (`{"confirm":true}`) |
@@ -286,6 +290,10 @@ python -m daedalus.api.server
 | GET | `/system/audit` | Audit log (`?operation=run&limit=50`) |
 | GET | `/system/events` | SSE container lifecycle events |
 | WS | `/containers/{id}/exec` | WebSocket terminal |
+
+The stats history is collected by the server's sampling engine (2 s cadence, derived
+CPU%/delta rates with a 300-point ring per container) and **persists across server
+restarts** at `~/.daedalus/store/stats-history.json` (saved every 10 ticks, load-on-boot).
 
 **curl examples:**
 
