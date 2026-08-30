@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 
 import pytest
 
@@ -20,6 +21,8 @@ from daedalus.core.backend import (
     PruneResult,
     RunSpec,
     StatsSample,
+    VolumeInfo,
+    VolumeSpec,
 )
 from daedalus.core.capabilities import CapabilityManifest
 from daedalus.core.exceptions import DetonationError, PolicyViolationError, ValidationError
@@ -61,6 +64,8 @@ class MockBackend(Backend):
         self.network_delete_calls: list[str] = []
         self.machine_calls: list[tuple[str, tuple]] = []
         self.machine_logs_result: str = ""
+        self.volumes: dict[str, VolumeInfo] = {}
+        self.volume_calls: list[tuple[str, tuple]] = []
 
     def _cid(self) -> str:
         cid = f"mock-{self.next_id:04d}"
@@ -274,6 +279,27 @@ class MockBackend(Backend):
         self.machine_calls.append(("logs", (machine_id,)))
         return self.machine_logs_result
 
+    # -- volumes (canned call-recording stubs) --
+    async def volume_create(self, spec: VolumeSpec) -> VolumeInfo:
+        self.volume_calls.append(("create", (spec,)))
+        info = VolumeInfo(id=spec.name, name=spec.name, raw={"mock": True})
+        self.volumes[spec.name] = info
+        return info
+    async def volume_list(self) -> list[VolumeInfo]:
+        self.volume_calls.append(("list", ()))
+        return list(self.volumes.values())
+    async def volume_inspect(self, name: str) -> VolumeInfo:
+        self.volume_calls.append(("inspect", (name,)))
+        return self.volumes.get(name, VolumeInfo(id=name, name=name))
+    async def volume_delete(self, name: str) -> None:
+        self.volume_calls.append(("delete", (name,)))
+        self.volumes.pop(name, None)
+    async def volume_prune(self) -> list[str]:
+        self.volume_calls.append(("prune", ()))
+        removed = list(self.volumes.keys())
+        self.volumes.clear()
+        return removed
+
     async def _run_cli(self, *args: str, **kwargs: object) -> tuple[int, str, str]:
         return (0, "", "")
 
@@ -297,6 +323,9 @@ def caps() -> CapabilityManifest:
         kernel_set=True,
         builder=False,
         system_dns=True,
+        # Represents a patched host for the detonation tests below (the
+        # runtime-security gate reads this field; unset would hard-block).
+        security_safe=True,
     )
 
 
@@ -628,3 +657,33 @@ class TestDetonate:
         assert "network_create" not in backend.call_log
         assert backend.call_log[-1] == "network_delete"
         assert backend.network_delete_calls == ["preexisting"]
+
+    @pytest.mark.parametrize("security_safe", [False, "untested"])
+    async def test_detonate_gated_on_unpatched_runtime(
+        self, caps: CapabilityManifest, tmp_path, security_safe: bool | str,
+    ):
+        """Below the 1.3.1 advisory floor (or unknown) → hard block, no backend calls."""
+        unsafe = replace(caps, security_safe=security_safe)
+        backend = MockBackend()
+        forge = Forge(
+            backend, unsafe,
+            store=Store(root=str(tmp_path / "store")),
+        )
+        with pytest.raises(ValidationError, match="1.3.1"):
+            await forge.detonate(self._sample_file(tmp_path))
+        # The gate fires before any backend call — not even the network.
+        assert backend.call_log == []
+
+    async def test_detonate_proceeds_on_patched_runtime(
+        self, caps: CapabilityManifest, tmp_path,
+    ):
+        backend = MockBackend()
+        forge = Forge(
+            backend, caps,  # caps fixture carries security_safe=True
+            store=Store(root=str(tmp_path / "store")),
+        )
+        result = await forge.detonate(
+            self._sample_file(tmp_path), observe_seconds=5.0,
+        )
+        assert result["run_id"]
+        assert backend.call_log  # the loop ran past the security gate

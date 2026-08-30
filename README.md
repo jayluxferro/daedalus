@@ -45,7 +45,10 @@ A security-research control plane built on Apple's `container` runtime. DAEDALUS
 
 - **macOS 26+** (Tahoe)
 - **Apple silicon** (arm64)
-- **container** installed at `/usr/local/bin/container` (1.2.2+)
+- **container** installed at `/usr/local/bin/container` — **≥ 1.3.1 required** for the
+  detonation workflow (its isolation promise depends on the 1.3.1 GHSA advisory fixes);
+  **≥ 1.2.2** for everything else. Note: container 1.3.0 removed `--scheme auto` (the
+  default is https) — daedalus never emits `auto`.
 - **Python 3.12+**
 - **uv** package manager
 - **Node.js 22+** (for UI development only)

@@ -7,7 +7,7 @@ Status: **Approved for implementation** · Branch: `feature/ungate-container-1.2
 Wrap the last runtime storage surface (`container volume`, 1.2.2) and use the newly-verified hardening flags (`--read-only`, `--cap-drop`) in the security profiles:
 
 1. **Volume verbs** — create/list/inspect/delete/prune across Backend/CliBackend, a thin `Volumes` engine service, and all four surfaces.
-2. **Profile hardening** — `Profile` gains `read_only: bool` + `cap_drop: list[str]`; `RunSpec` gains `read_only` (+ `--read-only` emission); `detonation`/`fuzz` profiles hardened (`read_only=True`, `cap_drop=["ALL"]` for detonation).
+2. **Profile hardening** — `Profile` gains `read_only: bool` + `cap_drop: list[str]`; `RunSpec` gains `read_only` (+ `--read-only` emission); `detonation` profile hardened with `cap_drop=["ALL"]` but **NOT `read_only`** — a read-only rootfs would blind the phase-3 FS-diff forensics (nothing writable → no runtime writes to observe; the sample could not run); capability lockdown provides the privilege reduction instead. `fuzz` unchanged.
 3. **Kernel reality** — `system kernel` only exposes `set` in 1.2.2 (already wrapped); add the CLI `kernel` command surface (`daedalus kernel set --recommended|--binary|--tar`), and fix the stub `system_kernel_list` (mark honestly: returns known kernels from ariadne registry or `[]` with a docstring noting 1.2.2 exposes no list verb).
 
 ## 2. Verified environment (captured live 2026-08-22)

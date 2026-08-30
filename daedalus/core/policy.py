@@ -166,6 +166,15 @@ class PolicyEngine:
             )
         return PolicyResult(Decision.ALLOW)
 
+    def check_volume_delete(self, *, confirm: bool = False) -> PolicyResult:
+        """Deleting a volume is CONFIRM-gated unless confirm=True. Mirror check_network_delete."""
+        if self.config.require_confirm_destroy and not confirm:
+            return PolicyResult(
+                Decision.CONFIRM,
+                "Volume delete requires confirm=True",
+            )
+        return PolicyResult(Decision.ALLOW)
+
     def check_network_expose(self, *, confirm: bool = False) -> PolicyResult:
         if self.config.require_confirm_network_expose and not confirm:
             return PolicyResult(
@@ -179,6 +188,27 @@ class PolicyEngine:
             return PolicyResult(
                 Decision.CONFIRM,
                 "Kernel change requires confirm=True",
+            )
+        return PolicyResult(Decision.ALLOW)
+
+    def check_runtime_security(self, *, security_safe: bool | str) -> PolicyResult:
+        """Gate the detonation workflow on a patched container runtime.
+
+        ``security_safe`` comes from the host capability manifest
+        (``CapabilityManifest.security_safe``), which compares the parsed
+        container version against the 1.3.1 GHSA advisory floor — the
+        policy stays manifest-agnostic.  Anything other than ``True``
+        (below the floor, or an unparseable/unknown version) is
+        CONFIRM-gated: ``forge.detonate`` has no confirm path, so the
+        CONFIRM result hard-blocks detonation until the runtime is
+        upgraded.  There is no config flag — the manifest value is the
+        only input (no operator override; upgrading is the fix).
+        """
+        if security_safe is not True:
+            return PolicyResult(
+                Decision.CONFIRM,
+                "container runtime is below the security floor (>= 1.3.1) "
+                "— GHSA advisories unfixed; requires confirm",
             )
         return PolicyResult(Decision.ALLOW)
 

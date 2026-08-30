@@ -18,6 +18,8 @@ from daedalus.core.backend import (
     PruneResult,
     RunSpec,
     StatsSample,
+    VolumeInfo,
+    VolumeSpec,
 )
 from daedalus.core.capabilities import CapabilityManifest
 from daedalus.core.cli_backend import CliBackend, OutputParser
@@ -39,6 +41,18 @@ NETWORK_LIST_JSON = """[{"configuration": {"creationDate": "2026-08-20T00:56:04Z
   "id": "default",
   "status": {"ipv4Gateway": "192.168.64.1", "ipv4Subnet": "192.168.64.0/24",
              "ipv6Subnet": "fd8b:1877:bb8f:91bb::/64"}}]"""
+
+# Literal wire shape from SPEC §2 (captured live on container 1.2.2).
+# The source path exceeds 100 chars, so the JSON is assembled from
+# adjacent string literals (the parsed value is byte-identical).
+VOLUME_LIST_JSON = (
+    '[{"configuration": {"creationDate": "2026-08-22T06:10:50Z", '
+    '"driver": "local", "format": "ext4", "labels": {}, "name": '
+    '"daedalus-probe-v", "options": {"size": "100M"}, "sizeInBytes": '
+    '104857600, "source": "/Users/jay/Library/Application Support/'
+    'com.apple.container/volumes/daedalus-probe-v/volume.img"}, '
+    '"id": "daedalus-probe-v"}]'
+)
 
 
 # ------------------------------------------------------------------
@@ -583,3 +597,157 @@ class TestMachineSpecSerialization:
     def test_to_set_args_kernel_empty_resets(self) -> None:
         # kernel="" is meaningful — the CLI resets the kernel
         assert MachineSetSettings(kernel="").to_set_args() == ["kernel="]
+
+
+# ------------------------------------------------------------------
+# volume parsing (SPEC §2 — captured live on container 1.2.2)
+# ------------------------------------------------------------------
+
+
+class TestVolumeListParser:
+    def test_parse_literal_list(self) -> None:
+        volumes = OutputParser.volume_list(VOLUME_LIST_JSON)
+        assert len(volumes) == 1
+        v = volumes[0]
+        assert isinstance(v, VolumeInfo)
+        assert v.id == "daedalus-probe-v"
+        assert v.name == "daedalus-probe-v"
+        assert v.driver == "local"
+        assert v.format == "ext4"
+        assert v.size_bytes == 104857600
+        assert v.size_spec == "100M"          # from options.size
+        assert v.source == (
+            "/Users/jay/Library/Application Support/com.apple.container/"
+            "volumes/daedalus-probe-v/volume.img"
+        )
+        assert v.created_date == "2026-08-22T06:10:50Z"
+        assert v.labels == {}
+        assert v.options == {"size": "100M"}
+        # raw carries the full dict, not just the parsed projection
+        assert v.raw["id"] == "daedalus-probe-v"
+        assert v.raw["configuration"]["sizeInBytes"] == 104857600
+
+    def test_parse_empty_array(self) -> None:
+        assert OutputParser.volume_list("[]") == []
+
+    def test_parse_empty_text(self) -> None:
+        assert OutputParser.volume_list("") == []
+
+    def test_missing_configuration_defaults(self) -> None:
+        [v] = OutputParser.volume_list('[{"id": "v1"}]')
+        assert v.id == "v1"
+        assert v.name == ""
+        assert v.driver == ""
+        assert v.format == ""
+        assert v.size_bytes == 0
+        assert v.size_spec == ""
+        assert v.source == ""
+        assert v.created_date == ""
+        assert v.labels == {}
+        assert v.options == {}
+
+
+class TestVolumeInspectParser:
+    def test_parse_literal_inspect(self) -> None:
+        # inspect output is the same shape but arrives as a JSON array
+        v = OutputParser.volume_inspect(VOLUME_LIST_JSON)
+        assert isinstance(v, VolumeInfo)
+        assert v.id == "daedalus-probe-v"
+        assert v.name == "daedalus-probe-v"
+        assert v.driver == "local"
+        assert v.format == "ext4"
+        assert v.size_bytes == 104857600
+        assert v.size_spec == "100M"
+        assert v.source.endswith("volumes/daedalus-probe-v/volume.img")
+        assert v.options == {"size": "100M"}
+
+    def test_multiple_volumes_uses_first(self) -> None:
+        two = (
+            '[{"id": "first", "configuration": {"name": "first"}},'
+            ' {"id": "second", "configuration": {"name": "second"}}]'
+        )
+        v = OutputParser.volume_inspect(two)
+        assert v.id == "first"
+        assert v.name == "first"
+
+    def test_empty_array_returns_empty_info(self) -> None:
+        v = OutputParser.volume_inspect("[]")
+        assert v.id == ""
+        assert v.name == ""
+        assert v.driver == ""
+        assert v.size_bytes == 0
+        assert v.size_spec == ""
+
+    def test_volume_id_first_nonempty_line(self) -> None:
+        assert OutputParser.volume_id("daedalus-probe-v\n") == "daedalus-probe-v"
+        assert OutputParser.volume_id("") == ""
+
+
+class TestVolumeSpecSerialization:
+    def test_to_cli_args_order_and_name_last(self) -> None:
+        spec = VolumeSpec(
+            name="evidence-01",
+            size="100M",
+            labels={"owner": "daedalus", "tier": "evidence"},
+            options={"fs": "ext4"},
+        )
+        assert spec.to_cli_args() == [
+            "--label", "owner=daedalus",
+            "--label", "tier=evidence",
+            "--opt", "fs=ext4",
+            "-s", "100M",
+            "evidence-01",
+        ]
+
+    def test_defaults_emit_name_only(self) -> None:
+        assert VolumeSpec(name="evidence-01").to_cli_args() == ["evidence-01"]
+
+
+# ------------------------------------------------------------------
+# RunSpec --read-only serialization
+# ------------------------------------------------------------------
+
+
+class TestRunSpecReadOnly:
+    def test_false_omits_flag(self) -> None:
+        args = RunSpec(image="alpine:latest").to_cli_args()
+        assert "--read-only" not in args
+        assert args == ["alpine:latest"]
+
+    def test_true_emits_flag(self) -> None:
+        args = RunSpec(image="alpine:latest", read_only=True).to_cli_args()
+        assert "--read-only" in args
+
+    def test_ordering_after_volume_flags(self) -> None:
+        spec = RunSpec(image="alpine:latest", volumes=["data:/data"], read_only=True)
+        args = spec.to_cli_args()
+        assert args.index("--volume") < args.index("--read-only")
+        assert args.index("--read-only") < args.index("alpine:latest")
+
+
+# ------------------------------------------------------------------
+# RunSpec --init-image / --ssh serialization (container 1.3.1)
+# ------------------------------------------------------------------
+
+
+class TestRunSpecInitImageSsh:
+    def test_defaults_emit_nothing(self) -> None:
+        args = RunSpec(image="alpine:latest").to_cli_args()
+        assert "--init-image" not in args
+        assert "--ssh" not in args
+        assert args == ["alpine:latest"]
+
+    def test_init_image_emitted(self) -> None:
+        args = RunSpec(image="alpine:latest", init_image="trace-init:latest").to_cli_args()
+        assert args[args.index("--init-image") + 1] == "trace-init:latest"
+        assert args.index("--init-image") < args.index("alpine:latest")
+
+    def test_ssh_emitted(self) -> None:
+        args = RunSpec(image="alpine:latest", ssh=True).to_cli_args()
+        assert "--ssh" in args
+        assert args.index("--ssh") < args.index("alpine:latest")
+
+    def test_ordering_init_image_then_ssh_before_image(self) -> None:
+        spec = RunSpec(image="alpine:latest", init_image="i:1", ssh=True)
+        args = spec.to_cli_args()
+        assert args.index("--init-image") < args.index("--ssh") < args.index("alpine:latest")

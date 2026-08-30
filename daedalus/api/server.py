@@ -45,6 +45,13 @@ Endpoints::
     POST /machines/{machine_id}/run
     GET  /machines/{machine_id}/logs
 
+    # Volumes
+    GET  /volumes
+    POST /volumes
+    GET  /volumes/{name}
+    DELETE /volumes/{name}
+    POST /volumes/prune
+
     # Profiles
     GET  /profiles
 
@@ -62,6 +69,7 @@ Endpoints::
     GET  /system/status
     GET  /system/audit
     GET  /system/events               (SSE)
+    POST /system/kernel/set
 
     # UI (static SPA)
     GET  /ui/*
@@ -89,6 +97,8 @@ from daedalus.core.backend import (
     MachineCreateSpec,
     MachineSetSettings,
     NetworkSpec,
+    VolumeInfo,
+    VolumeSpec,
 )
 from daedalus.core.capabilities import ensure_daemon, probe
 from daedalus.core.cli_backend import CliBackend
@@ -101,6 +111,7 @@ from daedalus.core.policy import PolicyEngine, PolicyResult, load_policy_config
 from daedalus.core.profiles import ProfileRegistry
 from daedalus.core.store import Store
 from daedalus.core.talos import Talos
+from daedalus.core.volume import Volumes
 
 # ==========================================================================
 # Request models
@@ -213,6 +224,11 @@ def _machine_dict(info: Any) -> dict[str, Any]:
     return info.to_dict()
 
 
+def _volume_dict(info: VolumeInfo) -> dict[str, Any]:
+    """Serialise a volume (``VolumeInfo``) as a flat dict."""
+    return info.to_dict()
+
+
 class ExecRequest(BaseModel):
     command: list[str]
     user: str | None = None
@@ -251,6 +267,13 @@ class ExportRequest(BaseModel):
 
 class PruneRequest(BaseModel):
     confirm: bool = False
+
+
+class VolumeCreateRequest(BaseModel):
+    name: str
+    size: str | None = None
+    labels: dict[str, str] = {}
+    options: dict[str, str] = {}
 
 
 class NetworkCreateRequest(BaseModel):
@@ -320,6 +343,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         "mint": Mint(backend, audit=audit),
         "talos": Talos(backend, caps, policy=policy, audit=audit),
         "machina": Machina(backend, caps, policy=policy, audit=audit),
+        "volumes": Volumes(backend, caps, policy=policy, audit=audit),
         "profiles": ProfileRegistry(),
         "audit": audit,
         "store": store,
@@ -819,6 +843,58 @@ async def network_delete(name: str, confirm: bool = Query(False)) -> dict[str, A
     s = _get_state()
     await s["talos"].network_delete(name, confirm=True)
     return {"status": "deleted", "name": name}
+
+
+# ==========================================================================
+# Volumes (container 1.2.2 — persistent disk images)
+# ==========================================================================
+
+
+@app.get("/volumes")
+async def volume_list() -> list[dict[str, Any]]:
+    """List all named volumes."""
+    s = _get_state()
+    volumes = await s["volumes"].list()
+    return [_volume_dict(v) for v in volumes]
+
+
+@app.post("/volumes")
+async def volume_create(req: VolumeCreateRequest) -> dict[str, Any]:
+    """Create a named volume."""
+    s = _get_state()
+    spec = VolumeSpec(
+        name=req.name, size=req.size, labels=req.labels, options=req.options,
+    )
+    info = await s["volumes"].create(spec)
+    return _volume_dict(info)
+
+
+@app.get("/volumes/{name}")
+async def volume_inspect(name: str) -> dict[str, Any]:
+    """Inspect a single named volume."""
+    s = _get_state()
+    info = await s["volumes"].inspect(name)
+    return _volume_dict(info)
+
+
+@app.delete("/volumes/{name}")
+async def volume_delete(name: str, confirm: bool = Query(False)) -> dict[str, Any]:
+    """Delete a volume (destructive — confirm required)."""
+    if not confirm:
+        raise HTTPException(status_code=400, detail="confirm=true required for deletion")
+    s = _get_state()
+    await s["volumes"].delete(name, confirm=True)
+    return {"status": "deleted", "name": name}
+
+
+@app.post("/volumes/prune")
+async def volume_prune(req: PruneRequest) -> dict[str, Any]:
+    """Prune unused volumes (destructive — confirm required)."""
+    if not req.confirm:
+        raise HTTPException(status_code=400, detail="confirm=true required for prune")
+    s = _get_state()
+    removed = await s["volumes"].prune(confirm=True)
+    return {"removed": removed}
 
 
 # ==========================================================================

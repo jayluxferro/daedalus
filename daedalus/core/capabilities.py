@@ -44,6 +44,7 @@ class CapabilityManifest:
     # -- container binary ------------------------------------------------
     container_binary: str = ""
     container_version: str = ""
+    container_version_tuple: tuple[int, int, int] = (0, 0, 0)
     container_commit: str = ""
 
     # -- daemon ----------------------------------------------------------
@@ -64,6 +65,8 @@ class CapabilityManifest:
     prune: bool | str = "untested"
     network_subcommand: bool | str = "untested"
     machine: bool | str = "untested"
+    volume: bool | str = "untested"
+    security_safe: bool | str = "untested"
 
     # -- flag inventory (from --help parsing) ----------------------------
     known_flags: set[str] = field(default_factory=set)
@@ -118,6 +121,13 @@ class CapabilityManifest:
             f"prune:        {self._fmt(self.prune)}",
             f"net-subcmd:   {self._fmt(self.network_subcommand)}",
             f"machine:      {self._fmt(self.machine)}",
+            f"volume:       {self._fmt(self.volume)}",
+            "security:     "
+            + (
+                "✓ ≥ 1.3.1 advisories fixed"
+                if self.security_safe is True
+                else "✗ < 1.3.1 vulnerable" if self.security_safe is False else "? unknown"
+            ),
         ]
         if self.extra_flags:
             lines.append("─────────────────────────────────")
@@ -142,6 +152,13 @@ class CapabilityManifest:
 # names).  Populated by inspecting actual ``container * --help`` output.
 # This is a *reference set* — the probe diffs discovered flags against it.
 
+# Security floor for the detonation workflow: container 1.3.1 fixed the six
+# GHSA advisories (bundle file-deletion via unchecked ids, OCI descriptor
+# path traversal, symlink reads on image load, registry realm validation,
+# crafted-layer crashes) that the detonation isolation promise depends on.
+SECURITY_MIN_VERSION: str = "1.3.1"
+SECURITY_MIN_VERSION_TUPLE: tuple[int, int, int] = (1, 3, 1)
+
 EXPECTED_FLAGS: set[str] = {
     # Run / create flags (from container run --help)
     "cwd", "workdir", "env", "env-file", "uid", "gid",
@@ -150,7 +167,7 @@ EXPECTED_FLAGS: set[str] = {
     "remove", "rm", "os", "arch", "volume", "kernel",
     "cidfile", "no-dns", "dns", "dns-domain", "dns-search",
     "dns-option", "label", "disable-progress-updates", "scheme",
-    "debug", "version", "help",
+    "init-image", "ssh", "debug", "version", "help",
 }
 
 # Subcommands (not flags) — tracked separately for backend routing.
@@ -200,6 +217,8 @@ def probe(*, container_path: str | None = None) -> CapabilityManifest:
 
     # -- version ---------------------------------------------------------
     m.container_version, m.container_commit = _container_version(m.container_binary)
+    m.container_version_tuple = _version_tuple(m.container_version)
+    m.security_safe = _security_status(m.container_version_tuple)
 
     # -- daemon ----------------------------------------------------------
     m.apiserver_running = _probe_daemon(m)
@@ -222,6 +241,7 @@ def probe(*, container_path: str | None = None) -> CapabilityManifest:
     m.prune = _probe_subcommand(m.container_binary, "prune")
     m.network_subcommand = _probe_network_subcommand(m)
     m.machine = _probe_subcommand(m.container_binary, "machine")
+    m.volume = _probe_subcommand(m.container_binary, "volume")
     m.runtime_features = _runtime_features(m)
 
     m.probe_time = _now()
@@ -260,6 +280,32 @@ def _container_version(binary: str) -> tuple[str, str]:
         return (ver or "unknown", commit or "unknown")
     except Exception:
         return ("unknown", "unknown")
+
+
+def _version_tuple(version: str) -> tuple[int, int, int]:
+    """Parse the leading ``X.Y.Z`` of a container version string.
+
+    Returns ``(0, 0, 0)`` when the version is unparseable (e.g. a
+    ``dev-...`` build string) — the sentinel drives ``"untested"`` in
+    :func:`_security_status`.
+    """
+    m = re.match(r"(\d+)\.(\d+)\.(\d+)", version or "")
+    if not m:
+        return (0, 0, 0)
+    return (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+
+
+def _security_status(version_tuple: tuple[int, int, int]) -> bool | str:
+    """Tri-state security floor check for the detonation workflow.
+
+    True when the version is >= :data:`SECURITY_MIN_VERSION_TUPLE` (the
+    1.3.1 GHSA fixes are in), False below it, and ``"untested"`` when
+    the version could not be parsed at all (``(0, 0, 0)`` sentinel) —
+    an unknown version must not silently pass the gate.
+    """
+    if version_tuple == (0, 0, 0):
+        return "untested"
+    return version_tuple >= SECURITY_MIN_VERSION_TUPLE
 
 
 def _probe_daemon(m: CapabilityManifest) -> bool | str:
@@ -388,29 +434,15 @@ def _probe_kernel_set(m: CapabilityManifest) -> bool | str:
 
 
 def _probe_init_image(m: CapabilityManifest) -> bool | str:
-    """Check if ``--init-image`` flag is recognised."""
-    try:
-        r = subprocess.run(
-            [m.container_binary, "run", "--help"],
-            capture_output=True, text=True, timeout=10,
-        )
-        if "--init-image" not in (r.stdout + r.stderr):
-            return False
-        r = subprocess.run(
-            [m.container_binary, "create", "--init-image",
-             "__daedalus_probe_nonexistent__", "nonexistent:latest"],
-            capture_output=True, text=True, timeout=15,
-        )
-        stderr = (r.stderr or "").lower()
-        if any(phrase in stderr for phrase in
-               ("no such file", "not found", "cannot find", "invalid image")):
-            return True
-        if any(phrase in stderr for phrase in
-               ("unknown flag", "unrecognized", "unexpected argument")):
-            return False
-        return "untested"
-    except Exception:
-        return "untested"
+    """Check if ``--init-image`` is recognised, via the flag inventory.
+
+    The inventory (:func:`_flag_inventory`) parses ``container run --help``,
+    so the flag's presence there proves support.  An earlier version of
+    this probe additionally ran a live ``create`` with a nonexistent init
+    image — but that step tested *image fetch*, not flag support (any
+    pull failure read as "untested"), so it was removed.
+    """
+    return ("init-image" in m.known_flags) or ("init-image" in m.extra_flags)
 
 
 def _probe_rosetta(m: CapabilityManifest) -> bool | str:
@@ -493,7 +525,9 @@ def _runtime_features(m: CapabilityManifest) -> dict[str, bool | str]:
         "container_export": m.export is True,
         "container_prune": m.prune is True,
         "container_machines": m.machine is True,
+        "container_volumes": m.volume is True,
         "shared_default_network": m.networking is True,
+        "security_advisories_fixed": m.security_safe is True,
     }
 
 

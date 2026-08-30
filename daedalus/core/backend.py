@@ -39,10 +39,11 @@ class RunSpec:
     """The full set of flags for ``container create`` / ``container run``.
 
     This matches the flags confirmed present in container 1.2.2 via
-    ``container run --help`` / ``container create --help``.  Flags not
+    ``container run --help`` / ``container create --help``, plus
+    ``--init-image`` and ``--ssh`` (live in container 1.3.1).  Flags not
     yet covered by this dataclass (rosetta, shm-size, ulimit,
-    publish-socket, virtualization, init-image) are intentionally absent
-    — they will be added when the CLI supports them.
+    publish-socket, virtualization) are intentionally absent — they will
+    be added when the CLI supports them.
     """
 
     image: str
@@ -71,6 +72,7 @@ class RunSpec:
     mounts: list[str] = field(default_factory=list)   # --mount  type=<>,source=<>,target=<>,readonly
     tmpfs: list[str] = field(default_factory=list)    # --tmpfs
     volumes: list[str] = field(default_factory=list)  # -v / --volume
+    read_only: bool = False         # --read-only (rootfs read-only)
 
     # Kernel
     kernel: str | None = None       # -k / --kernel
@@ -91,7 +93,7 @@ class RunSpec:
     no_dns: bool = False            # --no-dns
 
     # Registry
-    scheme: str | None = None       # --scheme  (http, https, auto)
+    scheme: str | None = None       # --scheme  (http, https — auto removed in 1.3.0)
     disable_progress_updates: bool = False  # --disable-progress-updates
 
     # Network / capabilities (container 1.2.2)
@@ -99,6 +101,10 @@ class RunSpec:
     publish: list[str] = field(default_factory=list)   # -p <spec>, repeatable
     cap_add: list[str] = field(default_factory=list)   # --cap-add <cap>, repeatable
     cap_drop: list[str] = field(default_factory=list)  # --cap-drop <cap>, repeatable
+
+    # Init image / SSH agent (container 1.3.1)
+    init_image: str | None = None     # --init-image <image> (custom PID-1 / eBPF boot)
+    ssh: bool = False                 # --ssh (forward SSH agent socket into container)
 
     # Analysis / instrumentation
     proxy: str | None = None          # HTTP_PROXY/HTTPS_PROXY host:port
@@ -170,6 +176,8 @@ class RunSpec:
             flags += ["--tmpfs", t]
         for v in self.volumes:
             flags += ["--volume", v]
+        if self.read_only:
+            flags.append("--read-only")
 
         # --- kernel ---
         if self.kernel:
@@ -231,6 +239,12 @@ class RunSpec:
             flags += ["--cap-add", cap]
         for cap in self.cap_drop:
             flags += ["--cap-drop", cap]
+
+        # --- init image / ssh agent (container 1.3.1) ---
+        if self.init_image:
+            flags += ["--init-image", self.init_image]
+        if self.ssh:
+            flags.append("--ssh")
 
         # Image comes after all flags
         tail.append(self.image)
@@ -553,6 +567,68 @@ class MachineSetSettings:
             args.append(f"virtualization={'true' if self.virtualization else 'false'}")
         if self.kernel is not None:
             args.append(f"kernel={self.kernel}")
+        return args
+
+
+@dataclass
+class VolumeInfo:
+    """Parsed ``container volume list`` / ``volume inspect`` result (SPEC §2).
+
+    ``size_bytes`` is the byte count from ``sizeInBytes``; ``size_spec``
+    is the human CLI form from ``options.size`` (e.g. ``"100M"``).
+    """
+
+    id: str
+    name: str = ""
+    driver: str = ""                 # e.g. "local"
+    format: str = ""                 # e.g. "ext4"
+    size_bytes: int = 0
+    size_spec: str = ""              # e.g. "100M" (options.size)
+    source: str = ""                 # path to the volume.img backing file
+    created_date: str = ""
+    labels: dict[str, str] = field(default_factory=dict)
+    options: dict[str, str] = field(default_factory=dict)
+    raw: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialise the volume as a flat dict."""
+        return {
+            "id": self.id,
+            "name": self.name,
+            "driver": self.driver,
+            "format": self.format,
+            "size_bytes": self.size_bytes,
+            "size_spec": self.size_spec,
+            "source": self.source,
+            "created_date": self.created_date,
+            "labels": self.labels,
+            "options": self.options,
+        }
+
+
+@dataclass
+class VolumeSpec:
+    """Spec for ``container volume create`` (container 1.2.2).
+
+    The name is emitted **last** — the CLI syntax is
+    ``volume create [opts] <name>``.
+    """
+
+    name: str
+    size: str | None = None          # -s <size> e.g. "100M"
+    labels: dict[str, str] = field(default_factory=dict)   # --label k=v
+    options: dict[str, str] = field(default_factory=dict)  # --opt k=v
+
+    def to_cli_args(self) -> list[str]:
+        """Serialize into ``container volume create`` CLI arguments."""
+        args: list[str] = []
+        for k, v in self.labels.items():
+            args += ["--label", f"{k}={v}"]
+        for k, v in self.options.items():
+            args += ["--opt", f"{k}={v}"]
+        if self.size:
+            args += ["-s", self.size]
+        args.append(self.name)
         return args
 
 
@@ -942,6 +1018,33 @@ class Backend(ABC):
     @abstractmethod
     async def machine_logs(self, machine_id: str) -> str:
         """Dump a machine's boot/stdout logs as plain text."""
+        ...
+
+    # -- volumes (container 1.2.2) ----------------------------------------
+
+    @abstractmethod
+    async def volume_create(self, spec: VolumeSpec) -> VolumeInfo:
+        """Create a named volume (ext4 image) and return its full info."""
+        ...
+
+    @abstractmethod
+    async def volume_list(self) -> list[VolumeInfo]:
+        """List volumes.  Supports ``--format json``."""
+        ...
+
+    @abstractmethod
+    async def volume_inspect(self, name: str) -> VolumeInfo:
+        """Inspect a single volume (JSON array on the wire)."""
+        ...
+
+    @abstractmethod
+    async def volume_delete(self, name: str) -> None:
+        """Delete a volume (destructive)."""
+        ...
+
+    @abstractmethod
+    async def volume_prune(self) -> list[str]:
+        """Remove unused volumes; returns the pruned volume names."""
         ...
 
     # -- escape hatch ------------------------------------------------------

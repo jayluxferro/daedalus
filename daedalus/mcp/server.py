@@ -29,6 +29,8 @@ from daedalus.core.backend import (
     MachineSetSettings,
     NetworkInfo,
     NetworkSpec,
+    VolumeInfo,
+    VolumeSpec,
 )
 from daedalus.core.capabilities import ensure_daemon, probe
 from daedalus.core.cli_backend import CliBackend
@@ -41,6 +43,7 @@ from daedalus.core.policy import PolicyEngine, PolicyResult, load_policy_config
 from daedalus.core.profiles import ProfileRegistry
 from daedalus.core.store import Store
 from daedalus.core.talos import Talos
+from daedalus.core.volume import Volumes
 
 # ==========================================================================
 # Lifespan — no module-level I/O
@@ -58,6 +61,7 @@ class DaedalusContext:
     machina: Machina
     mint: Mint
     talos: Talos
+    volumes: Volumes
     profiles: ProfileRegistry
     policy: PolicyEngine
     audit: AuditLog
@@ -96,6 +100,7 @@ async def daedalus_lifespan(server: FastMCP) -> AsyncIterator[DaedalusContext]:
         machina=Machina(backend, caps, policy=policy, audit=audit),
         mint=Mint(backend, audit=audit),
         talos=Talos(backend, caps, policy=policy, audit=audit),
+        volumes=Volumes(backend, caps, policy=policy, audit=audit),
         profiles=ProfileRegistry(),
         policy=policy,
         audit=audit,
@@ -177,6 +182,11 @@ def _machine_dict(info: MachineInfo) -> dict[str, Any]:
     }
 
 
+def _volume_dict(v: VolumeInfo) -> dict[str, Any]:
+    """Serialise a ``VolumeInfo`` as a flat dict."""
+    return v.to_dict()
+
+
 # ==========================================================================
 # Server
 # ==========================================================================
@@ -197,12 +207,15 @@ Core capabilities:
 - Manage container networks via `daedalus_network_*`
 - Control system DNS via `daedalus_dns_*`
 - Manage persistent container machines via `daedalus_machine_*`
+- Manage named volumes (persistent disk images) via `daedalus_volume_*`
+- Set the default container kernel via `daedalus_kernel_set`
 
 Safety rules:
 1. ALWAYS call `daedalus_health` first to check what the host supports
 2. Destructive operations (`daedalus_destroy`, `daedalus_prune`,
    `daedalus_dns_delete`, `daedalus_network_delete`,
-   `daedalus_machine_delete`)
+   `daedalus_machine_delete`, `daedalus_volume_delete`,
+   `daedalus_volume_prune`)
    require `confirm=True` and are logged in the audit trail
 3. The default `detonation` profile applies maximum isolation
 4. Kernel overrides require `confirm_kernel=True` on `daedalus_run`
@@ -1874,6 +1887,188 @@ async def daedalus_machine_logs(
     dc = _get_ctx(ctx)
     try:
         return await dc.machina.logs(machine_id)
+    except DaedalusError as e:
+        return _err(e)
+
+
+# ==========================================================================
+# Volumes (container 1.2.2 — persistent disk images)
+# ==========================================================================
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="List named volumes",
+        readOnlyHint=True,
+        idempotentHint=True,
+    ),
+)
+async def daedalus_volume_list(ctx: Context | None = None) -> str:
+    """List named volumes (persistent disk images).
+
+    Returns a JSON array of {id, name, driver, format, size_bytes,
+    size_spec, source, created_date, labels, options} objects.
+    """
+    dc = _get_ctx(ctx)
+    try:
+        volumes = await dc.volumes.list()
+        return json.dumps([_volume_dict(v) for v in volumes])
+    except DaedalusError as e:
+        return _err(e)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Create a named volume",
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+    ),
+)
+async def daedalus_volume_create(
+    name: str,
+    size: str | None = None,
+    ctx: Context | None = None,
+) -> str:
+    """Create a named volume for persistent storage.
+
+    Volumes are ext4 disk images that survive container deletion — use
+    them for forensic evidence and lab data.  ``size`` is a human size
+    spec (e.g. "100M", "1G"); omit for the runtime default.
+    """
+    assert ctx is not None
+    dc = _get_ctx(ctx)
+    try:
+        spec = VolumeSpec(name=name, size=size)
+        info = await dc.volumes.create(spec)
+        _audit_agent(dc, "volume_create", {"name": name, "size": size},
+                     _volume_dict(info))
+        return _ok(_volume_dict(info))
+    except DaedalusError as e:
+        return _err(e)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Inspect a named volume",
+        readOnlyHint=True,
+        idempotentHint=True,
+    ),
+)
+async def daedalus_volume_inspect(
+    name: str, ctx: Context | None = None,
+) -> str:
+    """Inspect a single named volume.
+
+    Returns the same flat fields as daedalus_volume_list plus
+    created_date, labels and options.
+    """
+    dc = _get_ctx(ctx)
+    try:
+        info = await dc.volumes.inspect(name)
+        return _ok(_volume_dict(info))
+    except DaedalusError as e:
+        return _err(e)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Delete a named volume permanently",
+        readOnlyHint=False,
+        destructiveHint=True,
+        idempotentHint=False,
+    ),
+)
+async def daedalus_volume_delete(
+    name: str,
+    confirm: bool = False,
+    ctx: Context | None = None,
+) -> str:
+    """Delete a named volume. Requires confirm=True.
+
+    **WARNING**: Destructive operation.  Volumes hold forensic artifacts;
+    the backing disk image is unrecoverable after deletion.
+    """
+    if not confirm:
+        raise ValueError(json.dumps({
+            "error": "confirm=True required for volume deletion",
+            "code": "CONFIRM_REQUIRED",
+        }))
+    dc = _get_ctx(ctx)
+    try:
+        await dc.volumes.delete(name, confirm=True)
+        _audit_agent(dc, "volume_delete", {"name": name, "confirm": confirm})
+        return _ok({"name": name, "deleted": True})
+    except DaedalusError as e:
+        return _err(e)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Prune unused volumes",
+        readOnlyHint=False,
+        destructiveHint=True,
+        idempotentHint=False,
+    ),
+)
+async def daedalus_volume_prune(
+    confirm: bool = False,
+    ctx: Context | None = None,
+) -> str:
+    """Reclaim unused volumes and free disk space. Requires confirm=True.
+
+    **WARNING**: Destructive operation. Must pass confirm=True.
+    Returns {removed, count}.
+    """
+    if not confirm:
+        raise ValueError(json.dumps({
+            "error": "confirm=True required for volume prune",
+            "code": "CONFIRM_REQUIRED",
+        }))
+    dc = _get_ctx(ctx)
+    try:
+        removed = await dc.volumes.prune(confirm=True)
+        _audit_agent(dc, "volume_prune", {"confirm": confirm},
+                     {"removed": removed})
+        return _ok({"removed": removed, "count": len(removed)})
+    except DaedalusError as e:
+        return _err(e)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Set the default container kernel",
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+    ),
+)
+async def daedalus_kernel_set(
+    recommended: bool = False,
+    binary: str | None = None,
+    tar: str | None = None,
+    arch: str | None = None,
+    ctx: Context | None = None,
+) -> str:
+    """Set the default container kernel.
+
+    Pass recommended=True for the runtime's recommended kernel, or give
+    either a ``binary`` path or a ``tar`` archive (with optional
+    ``arch``, defaulting to arm64).  Returns {set, arch}.
+    """
+    assert ctx is not None
+    dc = _get_ctx(ctx)
+    try:
+        resolved_arch = arch or "arm64"
+        await dc.backend.system_kernel_set(
+            binary=binary, tar=tar, arch=resolved_arch,
+            recommended=recommended,
+        )
+        _audit_agent(dc, "kernel_set", {
+            "binary": binary, "tar": tar, "arch": arch,
+            "recommended": recommended,
+        })
+        return _ok({"set": True, "arch": resolved_arch})
     except DaedalusError as e:
         return _err(e)
 

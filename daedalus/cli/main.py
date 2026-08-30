@@ -20,6 +20,7 @@ from daedalus.core.backend import (
     MachineSetSettings,
     NetworkInfo,
     NetworkSpec,
+    VolumeSpec,
 )
 from daedalus.core.capabilities import CapabilityManifest, ensure_daemon, probe
 from daedalus.core.cli_backend import CliBackend
@@ -32,6 +33,7 @@ from daedalus.core.policy import PolicyEngine, PolicyResult, load_policy_config
 from daedalus.core.profiles import ProfileRegistry
 from daedalus.core.store import Store
 from daedalus.core.talos import Talos
+from daedalus.core.volume import Volumes
 
 app = typer.Typer(
     name="daedalus",
@@ -51,10 +53,12 @@ _mint: Mint | None = None
 _profiles: ProfileRegistry | None = None
 _store: Store | None = None
 _talos: Talos | None = None
+_volumes: Volumes | None = None
 
 
 def _bootstrap() -> None:
-    global _caps, _backend, _forge, _icarus, _machina, _mint, _profiles, _store, _talos
+    global _caps, _backend, _forge, _icarus, _machina, _mint
+    global _profiles, _store, _talos, _volumes
     if _caps is not None:
         return
     ensure_daemon()
@@ -86,11 +90,17 @@ def _bootstrap() -> None:
     _mint = Mint(backend, audit=audit)
     _machina = Machina(backend, _caps, policy=policy, audit=audit)
     _profiles = ProfileRegistry()
+    _volumes = Volumes(backend, _caps, policy=policy, audit=audit)
 
 
 def _b() -> CliBackend:
     assert _backend is not None
     return _backend
+
+
+def _c() -> CapabilityManifest:
+    assert _caps is not None
+    return _caps
 
 
 def _f() -> Forge:
@@ -126,6 +136,11 @@ def _st() -> Store:
 def _t() -> Talos:
     assert _talos is not None
     return _talos
+
+
+def _v() -> Volumes:
+    assert _volumes is not None
+    return _volumes
 
 
 # ==================================================================
@@ -928,6 +943,186 @@ def machine_logs(machine_id: str) -> None:
 
 
 # ==================================================================
+# Volumes
+# ==================================================================
+
+
+volume_app = typer.Typer(
+    name="volume",
+    help="Manage container volumes.",
+    no_args_is_help=True,
+)
+
+
+@volume_app.command("create")
+def volume_create(
+    name: str,
+    size: Annotated[str | None, typer.Option("-s", "--size", help="Size e.g. 100M")] = None,
+    label: Annotated[
+        list[str] | None,
+        typer.Option("--label", help="k=v label (repeatable)"),
+    ] = None,
+    option: Annotated[
+        list[str] | None,
+        typer.Option("--opt", help="k=v option (repeatable)"),
+    ] = None,
+) -> None:
+    """Create a named volume."""
+    _bootstrap()
+
+    async def _go() -> None:
+        spec = VolumeSpec(
+            name=name,
+            size=size,
+            labels=dict(i.split("=", 1) for i in label if "=" in i) if label else {},
+            options=dict(i.split("=", 1) for i in option if "=" in i) if option else {},
+        )
+        info = await _v().create(spec)
+        console.print(f"[green]✓[/] Created volume [bold]{info.name or info.id}[/]")
+    asyncio.run(_go())
+
+
+@volume_app.command("list")
+def volume_list(
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """List volumes."""
+    _bootstrap()
+
+    async def _go() -> None:
+        volumes = await _v().list()
+        if json_output:
+            console.print(json.dumps([v.to_dict() for v in volumes], indent=2))
+            return
+        if not volumes:
+            console.print("[dim]No volumes.[/]")
+            return
+        table = Table(title="Volumes")
+        table.add_column("Name", style="cyan")
+        table.add_column("Driver")
+        table.add_column("Format")
+        table.add_column("Size")
+        table.add_column("Source")
+        for v in volumes:
+            size = v.size_spec or (_fmt_size(v.size_bytes) if v.size_bytes else "-")
+            table.add_row(
+                v.name or v.id,
+                v.driver or "-",
+                v.format or "-",
+                size,
+                v.source or "-",
+            )
+        console.print(table)
+    asyncio.run(_go())
+
+
+@volume_app.command("inspect")
+def volume_inspect(
+    name: str,
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Inspect a volume."""
+    _bootstrap()
+
+    async def _go() -> None:
+        info = await _v().inspect(name)
+        if json_output:
+            console.print(json.dumps(info.to_dict(), indent=2))
+            return
+        size = info.size_spec or (_fmt_size(info.size_bytes) if info.size_bytes else "-")
+        console.print(f"Name:    {info.name or info.id}")
+        console.print(f"Driver:  {info.driver or '-'}")
+        console.print(f"Format:  {info.format or '-'}")
+        console.print(f"Size:    {size}")
+        console.print(f"Source:  {info.source or '-'}")
+        console.print(f"Created: {info.created_date or '-'}")
+        if info.labels:
+            console.print(f"Labels:  {info.labels}")
+    asyncio.run(_go())
+
+
+@volume_app.command("delete")
+def volume_delete(
+    name: str,
+    confirm: Annotated[bool, typer.Option("--confirm")] = False,
+) -> None:
+    """Delete a volume. Requires --confirm."""
+    _bootstrap()
+
+    async def _go() -> None:
+        if not confirm:
+            console.print("[yellow]requires --confirm[/]")
+            raise typer.Exit(code=1)
+        await _v().delete(name, confirm=True)
+        console.print(f"[red]✗[/] Deleted volume {name}")
+    asyncio.run(_go())
+
+
+@volume_app.command("prune")
+def volume_prune(
+    confirm: Annotated[bool, typer.Option("--confirm")] = False,
+) -> None:
+    """Prune unused volumes. Requires --confirm."""
+    _bootstrap()
+
+    async def _go() -> None:
+        if not confirm:
+            console.print("[yellow]requires --confirm[/]")
+            raise typer.Exit(code=1)
+        removed = await _v().prune(confirm=True)
+        if not removed:
+            console.print("[dim]Nothing to prune.[/]")
+            return
+        for name in removed:
+            console.print(f"[red]✗[/] {name}")
+    asyncio.run(_go())
+
+
+# ==================================================================
+# Kernel
+# ==================================================================
+
+
+kernel_app = typer.Typer(
+    name="kernel",
+    help="Manage the default container kernel.",
+    no_args_is_help=True,
+)
+
+
+@kernel_app.command("set")
+def kernel_set(
+    recommended: Annotated[bool, typer.Option("--recommended")] = False,
+    binary: Annotated[str | None, typer.Option("--binary", help="Path to a kernel binary")] = None,
+    tar: Annotated[str | None, typer.Option("--tar", help="Path to a kernel tar archive")] = None,
+    arch: Annotated[str, typer.Option("--arch")] = "arm64",
+) -> None:
+    """Set the default container kernel (--recommended, --binary, or --tar)."""
+    _bootstrap()
+    selected = [x for x in (recommended, binary, tar) if x]
+    if len(selected) != 1:
+        raise typer.BadParameter(
+            "exactly one of --recommended, --binary, --tar is required",
+        )
+
+    async def _go() -> None:
+        await _b().system_kernel_set(
+            binary=binary, tar=tar, arch=arch, recommended=recommended,
+        )
+        console.print("[green]✓[/] Kernel set")
+    asyncio.run(_go())
+
+
+@kernel_app.command("status")
+def kernel_status() -> None:
+    """Show the kernel-set capability gate."""
+    _bootstrap()
+    gate = _c().kernel_set
+    label = "✓" if gate is True else ("✗" if gate is False else str(gate))
+    console.print(f"kernel set: {label}")
+
+
+# ==================================================================
 # Images
 # ==================================================================
 
@@ -1430,6 +1625,8 @@ def _network_dict(info: NetworkInfo) -> dict[str, Any]:
 
 app.add_typer(network_app, name="network")
 app.add_typer(machine_app, name="machine")
+app.add_typer(volume_app, name="volume")
+app.add_typer(kernel_app, name="kernel")
 
 
 if __name__ == "__main__":

@@ -38,6 +38,8 @@ from daedalus.core.backend import (
     PruneResult,
     RunSpec,
     StatsSample,
+    VolumeInfo,
+    VolumeSpec,
 )
 from daedalus.core.capabilities import CapabilityManifest
 from daedalus.core.exceptions import (
@@ -321,6 +323,76 @@ class OutputParser:
         info.user_uid = int(user.get("uid", 0) or 0)
         info.user_gid = int(user.get("gid", 0) or 0)
         return info
+
+    # -- volumes (container 1.2.2) ----------------------------------------
+
+    @staticmethod
+    def volume_id(text: str) -> str:
+        """Parse the echoed volume name from ``volume create`` output.
+
+        The CLI prints the volume name on stdout (and nothing else).
+        """
+        lines = OutputParser.lines(text)
+        return lines[0] if lines else ""
+
+    @staticmethod
+    def volume_list(text: str) -> list[VolumeInfo]:
+        """Parse ``volume list --format json`` output (SPEC §2).
+
+        The top-level ``id`` and ``configuration.name`` are both the
+        volume name; ``options.size`` carries the human size spec
+        (e.g. ``"100M"``) alongside the byte count ``sizeInBytes``.
+        """
+        data = OutputParser.json(text)
+        items: list[dict[str, Any]] = []
+        if isinstance(data, list):
+            items = [item for item in data if isinstance(item, dict)]
+        elif isinstance(data, dict) and data:
+            items = [data]
+        return [OutputParser._volume_info(item) for item in items]
+
+    @staticmethod
+    def volume_inspect(text: str) -> VolumeInfo:
+        """Parse ``volume inspect <name>`` output (SPEC §2).
+
+        Inspect prints a JSON array directly (no ``--format`` flag); the
+        first element describes the requested volume.
+        """
+        data = OutputParser.json(text)
+        item: dict[str, Any] = {}
+        if isinstance(data, list) and data:
+            first = data[0]
+            if isinstance(first, dict):
+                item = first
+        elif isinstance(data, dict):
+            item = data
+        return OutputParser._volume_info(item)
+
+    @staticmethod
+    def _volume_info(item: dict[str, Any]) -> VolumeInfo:
+        """Map a single volume list/inspect entry to :class:`VolumeInfo`."""
+        cfg = item.get("configuration", {})
+        if not isinstance(cfg, dict):
+            cfg = {}
+        options = cfg.get("options", {})
+        if not isinstance(options, dict):
+            options = {}
+        labels = cfg.get("labels", {})
+        if not isinstance(labels, dict):
+            labels = {}
+        return VolumeInfo(
+            id=str(item.get("id", "") or ""),
+            name=str(cfg.get("name", "") or ""),
+            driver=str(cfg.get("driver", "") or ""),
+            format=str(cfg.get("format", "") or ""),
+            size_bytes=int(cfg.get("sizeInBytes", 0) or 0),
+            size_spec=str(options.get("size", "") or ""),
+            source=str(cfg.get("source", "") or ""),
+            created_date=str(cfg.get("creationDate", "") or ""),
+            labels={str(k): str(v) for k, v in labels.items()},
+            options={str(k): str(v) for k, v in options.items()},
+            raw=item,
+        )
 
 
 # ==========================================================================
@@ -721,6 +793,49 @@ class CliBackend(Backend):
             "machine", "logs", machine_id, binary=self._binary,
         )
         return out
+
+    # ==================================================================
+    # Volumes (container 1.2.2)
+    # ==================================================================
+
+    async def volume_create(self, spec: VolumeSpec) -> VolumeInfo:
+        self._require("container_volumes")
+        _, out, _ = await _run_cli_impl(
+            "volume", "create", *spec.to_cli_args(), binary=self._binary,
+        )
+        name = OutputParser.volume_id(out)
+        if not name:
+            return VolumeInfo(id="")
+        # Create echoes only the name — resolve the full info via inspect.
+        return await self.volume_inspect(name)
+
+    async def volume_list(self) -> list[VolumeInfo]:
+        self._require("container_volumes")
+        _, out, _ = await _run_cli_impl(
+            "volume", "list", "--format", "json", binary=self._binary,
+        )
+        return OutputParser.volume_list(out)
+
+    async def volume_inspect(self, name: str) -> VolumeInfo:
+        self._require("container_volumes")
+        # NOTE: no --format flag — volume inspect emits a JSON array.
+        _, out, _ = await _run_cli_impl(
+            "volume", "inspect", name, binary=self._binary,
+        )
+        return OutputParser.volume_inspect(out)
+
+    async def volume_delete(self, name: str) -> None:
+        self._require("container_volumes")
+        await _run_cli_impl("volume", "delete", name, binary=self._binary)
+
+    async def volume_prune(self) -> list[str]:
+        self._require("container_volumes")
+        # check=False — an empty prune output (nothing to remove) is a
+        # successful run, not an error; the pruned names land on stdout.
+        _, out, _ = await _run_cli_impl(
+            "volume", "prune", binary=self._binary, check=False,
+        )
+        return OutputParser.lines(out)
 
     # ==================================================================
     # Interaction

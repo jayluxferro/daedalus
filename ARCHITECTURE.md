@@ -110,7 +110,10 @@ OCI-compatible both ways (interops with Docker `save`/`load`). `builder start/st
 
 ### 2.5 Deep instrumentation hooks — *owned by `ariadne` (the thread/telemetry)*
 - `--init-image` — custom init image: run VM-level daemons, **configure eBPF filters**, instrument
-  boot *before* the OCI workload starts. **The core telemetry injection point.**
+  boot *before* the OCI workload starts. **The core telemetry injection point.** Live in
+  container 1.3.1 — serialised as `RunSpec.init_image` (ariadne unblocked).
+- `--ssh` — forward the host SSH agent socket into the container (live in container 1.3.1,
+  serialised as `RunSpec.ssh`).
 - `-k/--kernel` + `system kernel set` — per-container custom kernel (KASAN/KCOV/syzkaller, or
   deliberately vulnerable kernels for escape research).
 - `--cap-add`/`--cap-drop` (incl. `ALL`); `--read-only` rootfs; `--tmpfs`; `--shm-size`;
@@ -118,10 +121,16 @@ OCI-compatible both ways (interops with Docker `save`/`load`). `builder start/st
 - `--rosetta` — x86_64 samples on Apple silicon (cross-arch malware).
 - `--virtualization` — nested virt exposure (host+guest support permitting).
 - `--mount`/`-v` volumes with ext4 journaling (`ordered`/`writeback`/`journal`).
+- Registry scheme: `--scheme http|https` only — **`auto` was removed in container 1.3.0**
+  (the default is https); daedalus never emits `auto`.
 
 ### 2.6 System / control plane — *owned by `forge`*
 `system start/stop/status/version/logs/df`, `system kernel set`,
 `system property list` (TOML-config-backed).
+
+Runtime security floor: `policy.check_runtime_security` hard-blocks `forge.detonate` on a
+container runtime below **1.3.1** (or an unparseable version) — the detonation isolation
+promise depends on the 1.3.1 GHSA advisory fixes, and there is no override.
 
 ### 2.7 Forensics & analysis — *owned by `minos` (the judge)*
 Not a CLI feature set but a DAEDALUS layer built on `export` (FS tar), `stats --format json`
@@ -400,38 +409,41 @@ Containerization/XPC. Behind capability flags. *Test:* same `Backend` contract t
 
 ---
 
-## 9. Implementation status vs container 1.2.2
+## 9. Implementation status vs container 1.3.1
 
 The DAEDALUS control plane is fully implemented (Python, 24 modules, mypy strict,
-MCP + API + CLI surfaces).  The host runs container CLI **1.2.2** (commit `0190097`) — the
-same release Orchard pins.  Everything in this section is **implemented and working** against
-that release; anything still gated lives in the "container 1.2.2 reality" note below.
+MCP + API + CLI surfaces).  The host runs container CLI **1.3.1** (commit `a9a62e2`) — the
+security release that fixed the six GHSA advisories the detonation workflow depends on
+(bundle file-deletion via unchecked ids, OCI descriptor path traversal, symlink reads on image
+load, registry realm validation, crafted-layer crashes); **≥ 1.2.2** covers the rest of the
+surface.  Everything in this section is **implemented and working** against that release;
+anything still gated lives in the "container reality" note below.
 
-### Working today (container 1.2.2)
+### Working today (container 1.3.1)
 
 | Subsystem | Capability | Surface |
 |---|---|---|
 | forge | create, run, start, stop, kill, delete, list, inspect, logs | CLI, API, MCP |
 | forge | stats — one-shot CPU/mem/net/block/proc samples (`stats --no-stream --format json`), sampled in `StatsSample.sampled_at` for later rate derivation | CLI, API, MCP |
-| forge (RunSpec) | `--network <name>`, `-p/--publish` (repeatable), `--cap-add`, `--cap-drop` serialised by `RunSpec.to_cli_args()` | CLI, API, MCP |
+| forge (RunSpec) | `--network <name>`, `-p/--publish` (repeatable), `--cap-add`, `--cap-drop`, `--read-only`, `--init-image`, `--ssh` serialised by `RunSpec.to_cli_args()` | CLI, API, MCP |
 | icarus | exec (no `--` separator), logs (boot + stdio) | CLI, API, MCP |
 | icarus | copy — `copy_from`/`copy_to` (bidirectional, `id:` prefix built in code), byte-identical round-trip | CLI, API, MCP |
-| icarus | export — full-FS tar via `export_fs` (works on **running** containers in 1.2.2), indexed as a store artifact (`kind="fs"`) | CLI, API, MCP |
+| icarus | export — full-FS tar via `export_fs` (works on **running** containers), indexed as a store artifact (`kind="fs"`) | CLI, API, MCP |
 | mint | pull, push, save, load, tag, delete, inspect, list, prune, build | CLI, API, MCP |
 | talos | network CRUD — create/list/inspect/delete (default plugin `container-network-vmnet`), topology materialization via `apply_topology` | CLI, API, MCP |
 | machina | machine create/list/inspect/set/set-default/stop/delete/run/logs — persistent stateful VMs with init-capability advisor (name heuristic + log check) and confirm-gated delete | CLI, API, MCP |
 | talos | DNS control (`--dns`, `--dns-domain`, `--dns-search`, `--no-dns`), system DNS (create/delete/list) | CLI, API, MCP |
 | forge | prune — stop + reclaim disk via `container prune` | CLI, API, MCP |
-| forge | detonate — the full orchestrated loop (policy gate → disposable internal network → pre/post FS export diff → sample delivery to /root → exec + stats sampling → Minos report + risk score → store artifacts + audit → destroy). §5.1, SPEC phase 3 | CLI, API, MCP |
-| profiles | detonation, bench, fuzz, isolated, deception | CLI, API, MCP |
-| policy | concurrency, disk, image allow/block-list, confirm gates (destroy, network delete, network expose, kernel) | Engine |
+| forge | detonate — the full orchestrated loop (runtime-security floor gate → policy gate → disposable internal network → pre/post FS export diff → sample delivery to /root → exec + stats sampling → Minos report + risk score → store artifacts + audit → destroy). §5.1, SPEC phase 3 | CLI, API, MCP |
+| profiles | detonation, bench, fuzz, isolated, deception; custom profiles carry `init_image`/`ssh` | CLI, API, MCP |
+| policy | concurrency, disk, image allow/block-list, confirm gates (destroy, network delete, network expose, kernel), runtime-security floor (`check_runtime_security`) | Engine |
 | audit | append-only, checksummed JSONL audit log | Engine |
 | store | run manifests with artifact index (fs tars, reports) | Engine |
-| capabilities | host probe (binary, version, feature gates incl. stats/copy/export/prune/network, flag inventory) | CLI, MCP |
+| capabilities | host probe (binary, version tuple, feature gates incl. stats/copy/export/prune/network, flag inventory, `security_safe` GHSA-floor gate) | CLI, MCP |
 
-### container 1.2.2 reality (what still isn't wrapped)
+### container reality (what still isn't wrapped)
 
-The 1.2.2 `network` subcommand is fully wired and wrapped (create/list/inspect/delete, default
+The `network` subcommand is fully wired and wrapped (create/list/inspect/delete, default
 plugin `container-network-vmnet`); `stats`, `cp`/`copy`, `export`, and `prune` are present and
 wrapped by daedalus.  The `machine` subcommand is fully wired and wrapped by the `machina`
 subsystem (create/list/inspect/set/set-default/stop/delete/run/logs, phase 2): machines require
@@ -439,17 +451,20 @@ subsystem (create/list/inspect/set/set-default/stop/delete/run/logs, phase 2): m
 alpine/debian/ubuntu images will not boot (daedalus warns via the advisor and explains failures
 from the boot logs); machine **backing containers are hidden by the CLI** (the daemon's
 `container list` never shows them), and `container prune` does not touch machines.  The CLI also
-ships `volume` and a `k8s` plugin — these exist but are **not yet wrapped** by daedalus.
-Run/create flags beyond the RunSpec extension (`--rosetta`, `--virtualization`, `--init-image`,
-`--publish-socket`, `--shm-size`, `--ulimit`) are present in 1.2.2 but not yet serialised (the
-machine `--virtualization` flag *is* serialised on `MachineCreateSpec`); per-container kernels
-(`-k` + `system kernel set`) work.
+ships a `k8s` plugin — it exists but is **not yet wrapped** by daedalus.
+Run/create flags beyond the RunSpec extension (`--rosetta`, `--virtualization`,
+`--publish-socket`, `--shm-size`, `--ulimit`) are present but not yet serialised (the machine
+`--virtualization` flag *is* serialised on `MachineCreateSpec`); per-container kernels
+(`-k` + `system kernel set`) work.  `--init-image` and `--ssh` are **live** (1.3.1) —
+serialised as `RunSpec.init_image` / `RunSpec.ssh`, so ariadne's eBPF init-image telemetry is
+unblocked.  Registry scheme is `--scheme http|https` only — **`auto` was removed in container
+1.3.0** (the default is https); daedalus never emits `auto`.
 
 ### Quality gates (all passing)
 
 ```
-mypy --strict daedalus/     → Success: no issues found in 24 source files
-pytest tests/               → 236 passed, 1 skipped (214 unit + 22 integration; the slow systemd machine-boot test skips on the container 1.2.2 exec limitation, upstream apple/container#1669)
+mypy --strict daedalus/     → Success: no issues found in 25 source files
+pytest tests/               → 289 passed, 1 skipped (267 unit + 22 integration; the slow systemd machine-boot test skips on the container exec limitation, upstream apple/container#1669)
 Detonation §M7 test         → 2 live detonations: dropper vs no-op reports distinguishable, no VM/network leaks (tests/integration/test_detonation.py)
 Import-time I/O             → zero subprocess calls
 MCP (stdio)                 → 61 tools, handshake verified

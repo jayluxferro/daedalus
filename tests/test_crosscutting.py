@@ -36,6 +36,12 @@ class TestProfiles:
         # tmpfs deliberately absent: tmpfs on /tmp hides runtime drops from
         # the post-run export (blinding FS-diff forensics), and the VM is
         # destroyed after analysis so anti-persistence is moot.
+        # Capability lockdown, not read-only rootfs: a read-only rootfs
+        # would blind the phase-3 FS-diff forensics (nothing writable → no
+        # runtime writes to observe), so privilege reduction comes from
+        # dropping ALL capabilities instead.
+        assert p.cap_drop == ["ALL"]
+        assert p.read_only is False
 
     def test_bench_is_permissive(self):
         p = BUILTIN_PROFILES["bench"]
@@ -49,12 +55,30 @@ class TestProfiles:
         assert kwargs["dns"] == []
         # See test_detonation_is_safe — tmpfs removed for forensic completeness.
         assert kwargs["tmpfs"] == []
+        assert kwargs["cap_drop"] == ["ALL"]
+        assert kwargs["read_only"] is False
 
     def test_apply_accepts_overrides(self):
         p = BUILTIN_PROFILES["detonation"]
         kwargs = p.apply(no_dns=False, kernel="custom")
         assert kwargs["no_dns"] is False
         assert kwargs["kernel"] == "custom"
+
+    def test_apply_emits_init_image_and_ssh(self):
+        p = Profile(name="trace", init_image="trace-init:latest", ssh=True)
+        kwargs = p.apply()
+        assert kwargs["init_image"] == "trace-init:latest"
+        assert kwargs["ssh"] is True
+
+    def test_apply_init_image_ssh_defaults(self):
+        kwargs = BUILTIN_PROFILES["detonation"].apply()
+        assert kwargs["init_image"] is None
+        assert kwargs["ssh"] is False
+
+    def test_profile_defaults_fields(self):
+        p = Profile(name="plain")
+        assert p.init_image is None
+        assert p.ssh is False
 
     def test_registry_default_is_detonation(self):
         reg = ProfileRegistry()
@@ -161,6 +185,19 @@ class TestPolicy:
         engine.log("create", "agent", r)
         assert len(calls) == 1
         assert calls[0] == ("create", "agent", Decision.ALLOW)
+
+    def test_runtime_security_allow_when_patched(self):
+        engine = PolicyEngine()
+        r = engine.check_runtime_security(security_safe=True)
+        assert r.decision == Decision.ALLOW
+
+    @pytest.mark.parametrize("security_safe", [False, "untested"])
+    def test_runtime_security_confirm_when_unpatched(self, security_safe):
+        engine = PolicyEngine()
+        r = engine.check_runtime_security(security_safe=security_safe)
+        assert r.decision == Decision.CONFIRM
+        assert "1.3.1" in r.reason
+        assert "GHSA" in r.reason
 
 
 # ==========================================================================

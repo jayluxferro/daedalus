@@ -6,10 +6,14 @@ import pytest
 
 from daedalus.core.capabilities import (
     EXPECTED_FLAGS,
+    SECURITY_MIN_VERSION,
+    SECURITY_MIN_VERSION_TUPLE,
     SUBCOMMANDS,
     CapabilityManifest,
     _probe_subcommand,
     _runtime_features,
+    _security_status,
+    _version_tuple,
     probe,
 )
 
@@ -85,9 +89,10 @@ class TestCapabilityProbe:
         assert d["container_binary"] == m.container_binary
         assert d["networking"] == m.networking
         assert "runtime_features" in d
-        # Tri-state: on 1.2.2 the init-image create probe gets a registry
-        # 401 (not a clear yes/no), so "untested" is a legitimate result.
+        # Tri-state: the gate is flag-inventory-driven (run --help), so it
+        # is True on 1.3.1 hosts but must stay tri-state on older runtimes.
         assert d["init_image"] in (True, False, "untested")
+        assert d["security_safe"] in (True, False, "untested")
 
     def test_runtime_features_populated(self):
         m = probe()
@@ -107,11 +112,17 @@ class TestCapabilityProbe:
         assert m.prune is True
         assert m.network_subcommand is True
         assert m.machine is True
+        assert m.volume is True
 
     def test_probe_machine_gate(self):
         m = probe()
         assert m.machine is True
         assert m.runtime_features["container_machines"] is True
+
+    def test_probe_volume_gate(self):
+        m = probe()
+        assert m.volume is True
+        assert m.runtime_features["container_volumes"] is True
 
     def test_probe_new_runtime_features(self):
         m = probe()
@@ -122,6 +133,21 @@ class TestCapabilityProbe:
         assert rf["container_prune"] is True
         assert rf["custom_networks"] is True
         assert rf["container_machines"] is True
+        assert rf["container_volumes"] is True
+
+    def test_probe_init_image_gate(self):
+        """--init-image is in run --help on 1.3.1 → the gate is True."""
+        m = probe()
+        assert m.init_image is True
+        assert "init-image" in m.known_flags
+
+    def test_probe_security_floor(self):
+        """1.3.1 on this host → the GHSA advisory gate is satisfied."""
+        m = probe()
+        assert m.container_version_tuple >= SECURITY_MIN_VERSION_TUPLE
+        assert m.security_safe is True
+        assert m.runtime_features["security_advisories_fixed"] is True
+        assert SECURITY_MIN_VERSION == "1.3.1"
 
     def test_subcommands_reference_has_new_verbs(self):
         new_verbs = {
@@ -181,6 +207,7 @@ class TestCapabilityManifestUnit:
 
     @pytest.mark.parametrize("gate", [
         "stats", "copy", "export", "prune", "network_subcommand", "machine",
+        "volume",
     ])
     def test_new_verb_gates_default_untested(self, gate):
         m = CapabilityManifest()
@@ -194,6 +221,7 @@ class TestCapabilityManifestUnit:
             prune=True,
             network_subcommand=True,
             machine=True,
+            volume=True,
         )
         rf = _runtime_features(m)
         assert rf["container_stats"] is True
@@ -202,6 +230,7 @@ class TestCapabilityManifestUnit:
         assert rf["container_prune"] is True
         assert rf["custom_networks"] is True
         assert rf["container_machines"] is True
+        assert rf["container_volumes"] is True
 
         m = CapabilityManifest()
         rf = _runtime_features(m)
@@ -211,6 +240,7 @@ class TestCapabilityManifestUnit:
         assert rf["container_prune"] is False
         assert rf["custom_networks"] is False
         assert rf["container_machines"] is False
+        assert rf["container_volumes"] is False
 
     def test_as_dict_includes_new_fields(self):
         m = CapabilityManifest(
@@ -220,6 +250,7 @@ class TestCapabilityManifestUnit:
             prune=True,
             network_subcommand=True,
             machine=True,
+            volume=True,
         )
         d = m.as_dict()
         assert d["stats"] is True
@@ -228,6 +259,7 @@ class TestCapabilityManifestUnit:
         assert d["prune"] is True
         assert d["network_subcommand"] is True
         assert d["machine"] is True
+        assert d["volume"] is True
 
     def test_summary_includes_new_gates(self):
         m = CapabilityManifest(
@@ -237,6 +269,7 @@ class TestCapabilityManifestUnit:
             prune=True,
             network_subcommand=True,
             machine=True,
+            volume=True,
         )
         summary = m.summary()
         assert "stats:        ✓ yes" in summary
@@ -245,8 +278,53 @@ class TestCapabilityManifestUnit:
         assert "prune:        ✓ yes" in summary
         assert "net-subcmd:   ✓ yes" in summary
         assert "machine:      ✓ yes" in summary
+        assert "volume:       ✓ yes" in summary
 
     def test_probe_subcommand_helper(self):
         assert _probe_subcommand("/usr/bin/true") is True
         assert _probe_subcommand("/usr/bin/false", "nonexistent") is False
         assert _probe_subcommand("/nonexistent/binary") == "untested"
+
+    @pytest.mark.parametrize("version,expected", [
+        ("1.2.2", (1, 2, 2)),
+        ("1.3.1", (1, 3, 1)),
+        ("2.0.0", (2, 0, 0)),
+        ("1.3.1 (build: release)", (1, 3, 1)),
+        ("dev-2026.08", (0, 0, 0)),   # unparseable → sentinel
+        ("", (0, 0, 0)),
+        ("unknown", (0, 0, 0)),
+    ])
+    def test_version_tuple_parsing(self, version: str, expected: tuple[int, int, int]):
+        assert _version_tuple(version) == expected
+
+    @pytest.mark.parametrize("version_tuple,expected", [
+        ((1, 2, 2), False),          # below the 1.3.1 advisory floor
+        ((1, 3, 1), True),           # the floor itself
+        ((2, 0, 0), True),           # above the floor
+        ((0, 0, 0), "untested"),     # unparseable version → cannot vouch
+    ])
+    def test_security_status_comparison(
+        self, version_tuple: tuple[int, int, int], expected: bool | str,
+    ):
+        assert _security_status(version_tuple) == expected
+
+    def test_security_floor_constant(self):
+        assert SECURITY_MIN_VERSION == "1.3.1"
+        assert SECURITY_MIN_VERSION_TUPLE == (1, 3, 1)
+
+    @pytest.mark.parametrize("security_safe,needle", [
+        (True, "✓ ≥ 1.3.1 advisories fixed"),
+        (False, "✗ < 1.3.1 vulnerable"),
+        ("untested", "? unknown"),
+    ])
+    def test_summary_security_line(self, security_safe: bool | str, needle: str):
+        m = CapabilityManifest(security_safe=security_safe)
+        assert f"security:     {needle}" in m.summary()
+
+    def test_runtime_features_security_advisories(self):
+        m = CapabilityManifest(security_safe=True)
+        assert _runtime_features(m)["security_advisories_fixed"] is True
+        m = CapabilityManifest(security_safe=False)
+        assert _runtime_features(m)["security_advisories_fixed"] is False
+        m = CapabilityManifest(security_safe="untested")
+        assert _runtime_features(m)["security_advisories_fixed"] is False

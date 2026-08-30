@@ -368,8 +368,10 @@ class Forge:
     ) -> dict[str, Any]:
         """Detonate a sample in a disposable, isolated Labyrinth.
 
-        The full loop (SPEC phase 3 §3.2): policy gate → disposable internal
-        network → keep-alive run → pre-export baseline → sample delivery →
+        The full loop (SPEC phase 3 §3.2): policy gate (incl. the container
+        1.3.1 runtime-security floor — an unpatched runtime hard-blocks here)
+        → disposable internal network → keep-alive run → pre-export baseline
+        → sample delivery →
         concurrent exec + stats sampling → post-evidence (logs + post-export)
         → judge (Minos) → persist (report file + store artifacts + audit) →
         destroy with the rich report.  The network is always deleted in a
@@ -411,6 +413,22 @@ class Forge:
 
         # Step 1 — policy gate (concurrency / disk / image), same as run/create.
         await self._check_run(image, **kwargs)
+
+        # Step 1b — runtime security floor.  Detonation's isolation promise
+        # depends on the container 1.3.1 GHSA fixes (bundle file-deletion via
+        # unchecked ids, OCI descriptor path traversal, symlink reads on image
+        # load, registry realm validation, crafted-layer crashes).  There is no
+        # override — upgrading the runtime is the fix.
+        r = self._policy.check_runtime_security(
+            security_safe=self._capabilities.security_safe,
+        )
+        if r.decision == Decision.CONFIRM:
+            raise ValidationError(
+                "detonation requires a patched container runtime (>= 1.3.1) "
+                "— GHSA advisories unfixed; upgrade container"
+            )
+        self._policy.log("check_runtime_security", "forge", r)
+        self._policy.enforce(r)
 
         run_name = name or (
             f"detonation-{datetime.now(UTC).strftime('%Y%m%d-%H%M%S')}"
@@ -729,6 +747,7 @@ _RUNSPEC_FIELDS = {
     "scheme", "disable_progress_updates", "command",
     "proxy", "cert_path", "no_proxy",
     "network", "publish", "cap_add", "cap_drop",
+    "read_only", "init_image", "ssh",
 }
 
 
