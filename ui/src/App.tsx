@@ -11,8 +11,9 @@ import DnsView from './views/Dns'
 import TerminalView from './views/Terminal'
 import NetworksView from './views/Networks'
 import MachinesView from './views/Machines'
+import VolumesView from './views/Volumes'
 
-type Page = 'dashboard' | 'containers' | 'machines' | 'terminal' | 'images' | 'logs' | 'audit' | 'profiles' | 'experiments' | 'topology' | 'dns' | 'networks'
+type Page = 'dashboard' | 'containers' | 'machines' | 'terminal' | 'images' | 'logs' | 'audit' | 'profiles' | 'experiments' | 'topology' | 'dns' | 'networks' | 'volumes'
 
 const NAV: { id: Page; label: string }[] = [
   { id: 'dashboard', label: 'Dashboard' },
@@ -25,6 +26,7 @@ const NAV: { id: Page; label: string }[] = [
   { id: 'topology', label: 'Topology' },
   { id: 'dns', label: 'DNS' },
   { id: 'networks', label: 'Networks' },
+  { id: 'volumes', label: 'Volumes' },
   { id: 'audit', label: 'Audit' },
   { id: 'profiles', label: 'Profiles' },
 ]
@@ -76,6 +78,7 @@ export default function App() {
         {page === 'topology' && <TopologyView />}
         {page === 'dns' && <DnsView />}
         {page === 'networks' && <NetworksView />}
+        {page === 'volumes' && <VolumesView />}
         {page === 'profiles' && <ProfilesView />}
       </main>
     </div>
