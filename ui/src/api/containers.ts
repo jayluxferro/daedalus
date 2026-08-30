@@ -28,17 +28,46 @@ export function useInspectContainer(id: string | null) {
   })
 }
 
+/** POST /containers body — create/run a container. */
+export interface RunContainerBody {
+  image: string
+  name?: string
+  profile?: string
+  start?: boolean
+  detach?: boolean
+  remove?: boolean
+  command?: string[]
+  kernel?: string
+  cpus?: number
+  memory?: string
+  dns?: string[]
+  volumes?: string[]
+  mounts?: string[]
+  env?: Record<string, string>
+  workdir?: string
+  confirm_kernel?: boolean
+  // Container 1.3.1 run surface (SPEC phase 7 §6) — all optional
+  arch?: string
+  os?: string
+  platform?: string
+  rosetta?: boolean
+  ssh?: boolean
+  init?: boolean
+  init_image?: string
+  kernel_arg?: string[]
+  masked_path?: string[]
+  read_only_path?: string[]
+  shm_size?: string
+  ulimit?: string[]
+  publish_socket?: string[]
+  virtualization?: boolean
+  runtime?: string
+}
+
 export function useRunContainer() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (body: {
-      image: string; name?: string; profile?: string;
-      start?: boolean; detach?: boolean; remove?: boolean; command?: string[];
-      kernel?: string; cpus?: number; memory?: string; dns?: string[];
-      volumes?: string[]; mounts?: string[];
-      env?: Record<string, string>; workdir?: string;
-      confirm_kernel?: boolean;
-    }) => apiPost<ContainerInfo>('/containers', body),
+    mutationFn: (body: RunContainerBody) => apiPost<ContainerInfo>('/containers', body),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['containers'] }),
   })
 }
@@ -74,6 +103,36 @@ export function useKillContainer() {
       apiPost<{ status: string; state: string }>(`/containers/${id}/kill?signal=${encodeURIComponent(signal)}`),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['containers'] }),
   })
+}
+
+// ---------------------------------------------------------------------------
+// Exec (container 1.3.1: detached, ulimit)
+// ---------------------------------------------------------------------------
+
+export interface ExecResult {
+  exit_code: number
+  stdout: string
+  stderr: string
+}
+
+/** POST /containers/{id}/exec body (1.3.1 exec surface: detached, ulimit). */
+export interface ExecRequest {
+  command: string[]
+  user?: string
+  uid?: number
+  gid?: number
+  workdir?: string
+  env?: Record<string, string>
+  env_file?: string
+  tty?: boolean
+  interactive?: boolean
+  timeout?: number
+  detached?: boolean
+  ulimit?: string[]
+}
+
+export async function execContainer(id: string, req: ExecRequest): Promise<ExecResult> {
+  return apiPost<ExecResult>(`/containers/${encodeURIComponent(id)}/exec`, req)
 }
 
 // ---------------------------------------------------------------------------

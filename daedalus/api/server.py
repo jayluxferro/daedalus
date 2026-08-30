@@ -20,6 +20,8 @@ Endpoints::
     POST /containers/{id}/copy
     POST /containers/{id}/export
     POST /containers/prune
+    POST /containers/stop           (bulk; body {"all": true} → stop -a)
+    POST /containers/delete         (bulk; body {"all": true, "confirm": true} → delete -a)
     GET  /stats
     GET  /stats/history
     GET  /stats/stream               (SSE)
@@ -146,6 +148,26 @@ class RunRequest(BaseModel):
     cap_add: list[str] = []          # --cap-add
     cap_drop: list[str] = []         # --cap-drop
 
+    # Container 1.3.1 surface (SPEC phase 7 §6 — API row).  Scalars are
+    # Optional so the existing "only when set" threading in
+    # ``create_container`` can skip them; lists default to [] and bools
+    # to False per the pattern above.
+    arch: str | None = None          # -a / --arch
+    os: str | None = None            # --os
+    platform: str | None = None      # --platform <os/arch/variant> (precedence over os/arch)
+    rosetta: bool = False            # --rosetta
+    ssh: bool = False                # --ssh (forward SSH agent socket)
+    init: bool = False               # --init (custom PID-1)
+    init_image: str | None = None    # --init-image <image>
+    kernel_arg: list[str] = []       # --kernel-arg <k=v>, repeatable
+    masked_path: list[str] = []      # --masked-path <path>, repeatable
+    read_only_path: list[str] = []   # --read-only-path <path>, repeatable
+    shm_size: str | None = None      # --shm-size <size>
+    ulimit: list[str] = []           # --ulimit <spec>, repeatable
+    publish_socket: list[str] = []   # --publish-socket <spec>, repeatable
+    virtualization: bool = False     # --virtualization
+    runtime: str | None = None       # --runtime <name>
+
 
 class ImageTagRequest(BaseModel):
     source: str
@@ -193,6 +215,12 @@ class MachineSetRequest(BaseModel):
 
 class MachineRunRequest(BaseModel):
     command: list[str]
+    root: bool = False          # --root (container 1.3.1)
+    ulimit: list[str] | None = None  # --ulimit <spec>, repeatable
+    detached: bool = False      # -d
+    tty: bool = False           # -t
+    user: str | None = None     # -u
+    workdir: str | None = None  # -w
 
 
 def _container_dict(lab: Any) -> dict[str, Any]:
@@ -243,6 +271,8 @@ class ExecRequest(BaseModel):
     tty: bool = False
     interactive: bool = False
     timeout: float = 10.0  # seconds; kills command if still running
+    detached: bool = False       # exec -d (container 1.3.1)
+    ulimit: list[str] | None = None  # --ulimit <spec>, repeatable
 
 
 class BuildRequest(BaseModel):
@@ -269,6 +299,19 @@ class ExportRequest(BaseModel):
 
 
 class PruneRequest(BaseModel):
+    confirm: bool = False
+
+
+class StopAllRequest(BaseModel):
+    """Body for the bulk ``POST /containers/stop`` endpoint."""
+
+    all: bool = False
+
+
+class DeleteAllRequest(BaseModel):
+    """Body for the bulk ``POST /containers/delete`` endpoint."""
+
+    all: bool = False
     confirm: bool = False
 
 
@@ -451,6 +494,38 @@ async def create_container(req: RunRequest) -> dict[str, Any]:
         overrides["cap_add"] = req.cap_add
     if req.cap_drop:
         overrides["cap_drop"] = req.cap_drop
+    # Container 1.3.1 run surface — only when set, mirroring the pattern
+    # above; forge's ``_filter_run_kwargs`` keeps only RunSpec fields.
+    if req.arch is not None:
+        overrides["arch"] = req.arch
+    if req.os is not None:
+        overrides["os"] = req.os
+    if req.platform is not None:
+        overrides["platform"] = req.platform
+    if req.rosetta:
+        overrides["rosetta"] = req.rosetta
+    if req.ssh:
+        overrides["ssh"] = req.ssh
+    if req.init:
+        overrides["init"] = req.init
+    if req.init_image is not None:
+        overrides["init_image"] = req.init_image
+    if req.kernel_arg:
+        overrides["kernel_arg"] = req.kernel_arg
+    if req.masked_path:
+        overrides["masked_path"] = req.masked_path
+    if req.read_only_path:
+        overrides["read_only_path"] = req.read_only_path
+    if req.shm_size is not None:
+        overrides["shm_size"] = req.shm_size
+    if req.ulimit:
+        overrides["ulimit"] = req.ulimit
+    if req.publish_socket:
+        overrides["publish_socket"] = req.publish_socket
+    if req.virtualization:
+        overrides["virtualization"] = req.virtualization
+    if req.runtime is not None:
+        overrides["runtime"] = req.runtime
     overrides["remove"] = req.remove
     kwargs = p.apply(**overrides)
     forge: Any = s["forge"]
@@ -542,6 +617,64 @@ async def stop_container(
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 
+@app.post("/containers/stop")
+async def stop_all_containers(req: StopAllRequest) -> dict[str, Any]:
+    """Stop all containers (``stop -a`` — bulk endpoint).
+
+    The per-id route ``POST /containers/{id}/stop`` is unchanged; this
+    route exists for bulk operations and requires ``{"all": true}``.
+    Forge's per-container registry is not refreshed here (a bulk sweep
+    has no single id to re-read) — states update on the next
+    list/inspect.
+    """
+    if not req.all:
+        raise HTTPException(
+            status_code=400,
+            detail="all=true required for bulk stop; "
+                   "use POST /containers/{id}/stop for a single container",
+        )
+    s = _get_state()
+    try:
+        # backend.stop with all=True emits `stop -a`; the container_id
+        # is ignored in this mode (see cli_backend.stop).
+        await s["backend"].stop("", all=True)
+        s["audit"].record("stop", actor="service", actor_kind=ActorKind.SERVICE,
+                          args={"all": True})
+        return {"status": "stopped", "all": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@app.post("/containers/delete")
+async def delete_all_containers(req: DeleteAllRequest) -> dict[str, Any]:
+    """Delete all containers (``delete -a`` — bulk endpoint).
+
+    Destructive — requires ``{"confirm": true}``.  The per-id route
+    ``DELETE /containers/{id}`` (forge.destroy with its report ceremony)
+    is unchanged; a bulk sweep skips that ceremony and calls the backend
+    directly, like ``POST /containers/prune``.
+    """
+    if not req.all:
+        raise HTTPException(
+            status_code=400,
+            detail="all=true required for bulk delete; "
+                   "use DELETE /containers/{id} for a single container",
+        )
+    if not req.confirm:
+        raise HTTPException(status_code=400,
+                            detail="confirm=true required for bulk delete")
+    s = _get_state()
+    try:
+        # backend.delete with all=True emits `delete -a`; the
+        # container_id is ignored in this mode (see cli_backend.delete).
+        await s["backend"].delete("", force=True, all=True)
+        s["audit"].record("delete", actor="service", actor_kind=ActorKind.SERVICE,
+                          args={"all": True, "force": True})
+        return {"status": "deleted", "all": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
 @app.post("/containers/{container_id}/kill")
 async def kill_container(
     container_id: str,
@@ -571,6 +704,8 @@ async def container_exec(container_id: str, req: ExecRequest) -> dict[str, Any]:
             env_file=req.env_file,
             tty=req.tty,
             interactive=req.interactive,
+            detached=req.detached,
+            ulimit=req.ulimit,
             timeout=req.timeout,
         )
         result = await s["icarus"].exec(container_id, req.command, options=opts)
@@ -733,9 +868,26 @@ async def machine_delete(
 
 @app.post("/machines/{machine_id}/run")
 async def machine_run(machine_id: str, req: MachineRunRequest) -> dict[str, Any]:
-    """Boot the machine if necessary and run a command inside it."""
+    """Boot the machine if necessary and run a command inside it.
+
+    Newer machine-run options (root/ulimit/detached/tty/user/workdir) are
+    called directly on the backend because ``machina.run`` only forwards
+    env/gid/interactive/timeout today — revisit once machina gains the
+    full surface (SPEC phase 7 §4).
+    """
     s = _get_state()
-    result = await s["machina"].run(machine_id, req.command)
+    result = await s["backend"].machine_run(
+        machine_id,
+        req.command,
+        root=req.root,
+        ulimit=req.ulimit,
+        detached=req.detached,
+        tty=req.tty,
+        user=req.user,
+        workdir=req.workdir,
+    )
+    s["audit"].record("machine_run", actor="service", actor_kind=ActorKind.SERVICE,
+                      args={"machine_id": machine_id, "argv": req.command})
     payload: dict[str, Any] = {
         "exit_code": result.exit_code,
         "stdout": result.stdout,
@@ -749,10 +901,19 @@ async def machine_run(machine_id: str, req: MachineRunRequest) -> dict[str, Any]
 
 
 @app.get("/machines/{machine_id}/logs")
-async def machine_logs(machine_id: str) -> dict[str, str]:
-    """Dump a machine's boot/stdout logs."""
+async def machine_logs(
+    machine_id: str,
+    boot: bool = Query(False),
+    tail: int | None = Query(None),
+) -> dict[str, str]:
+    """Dump a machine's boot/stdout logs.
+
+    ``follow`` is CLI-only for now — live streaming would need SSE (see
+    ``/containers/{id}/logs/stream``).  Called on the backend directly
+    because ``machina.logs`` does not forward boot/tail yet.
+    """
     s = _get_state()
-    logs = await s["machina"].logs(machine_id)
+    logs = await s["backend"].machine_logs(machine_id, boot=boot, tail=tail)
     return {"logs": logs}
 
 

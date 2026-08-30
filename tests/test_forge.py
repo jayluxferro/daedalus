@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import builtins
 from dataclasses import replace
 
 import pytest
@@ -106,9 +107,10 @@ class MockBackend(Backend):
     async def stop(
         self,
         container_id: str,
-        timeout: int = 10,
         *,
+        timeout: int = 10,
         signal: str | None = None,
+        all: bool = False,
     ) -> None:
         self.call_log.append("stop")
         if container_id in self.containers:
@@ -118,7 +120,9 @@ class MockBackend(Backend):
         if container_id in self.containers:
             self.containers[container_id].state = ContainerState.STOPPED
 
-    async def delete(self, container_id: str, force: bool = False) -> None:
+    async def delete(
+        self, container_id: str, *, force: bool = False, all: bool = False,
+    ) -> None:
         self.call_log.append("delete")
         self.containers.pop(container_id, None)
 
@@ -270,12 +274,25 @@ class MockBackend(Backend):
         gid: int | None = None,
         interactive: bool = False,
         timeout: float = 60.0,
+        root: bool = False,
+        ulimit: builtins.list[str] | None = None,
+        detached: bool = False,
+        tty: bool = False,
+        user: str | None = None,
+        workdir: str | None = None,
     ) -> ExecResult:
         self.machine_calls.append(
             ("run", (machine_id, argv, env, gid, interactive, timeout)),
         )
         return ExecResult(0, "", "")
-    async def machine_logs(self, machine_id: str) -> str:
+    async def machine_logs(
+        self,
+        machine_id: str,
+        *,
+        boot: bool = False,
+        follow: bool = False,
+        tail: int | None = None,
+    ) -> str:
         self.machine_calls.append(("logs", (machine_id,)))
         return self.machine_logs_result
 

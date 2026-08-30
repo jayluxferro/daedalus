@@ -765,6 +765,9 @@ _RUNSPEC_FIELDS = {
     "proxy", "cert_path", "no_proxy",
     "network", "publish", "cap_add", "cap_drop",
     "read_only", "init_image", "ssh",
+    "init", "kernel_arg", "masked_path", "read_only_path", "rosetta",
+    "runtime", "shm_size", "ulimit", "publish_socket", "virtualization",
+    "platform",
 }
 
 

@@ -34,6 +34,8 @@ class ExecOptions:
     env: dict[str, str] | None = None
     env_file: str | None = None
     timeout: float = 30.0
+    detached: bool = False      # exec -d
+    ulimit: list[str] | None = None  # exec --ulimit <spec>, repeatable
 
 
 class Icarus:
@@ -96,6 +98,8 @@ class Icarus:
             interactive=opts.interactive,
             workdir=opts.workdir,
             env_file=opts.env_file,
+            detached=opts.detached,
+            ulimit=opts.ulimit,
             timeout=opts.timeout,
         )
         self._audit.record(

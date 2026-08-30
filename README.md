@@ -106,6 +106,11 @@ daedalus stats                        # live CPU/mem/net stats for running conta
                                        # a 2 s rolling history is served by the API server
                                        # (/stats/history, SSE /stats/stream — see below)
 
+# Multi-arch on Apple silicon: run amd64 (x86_64) guests in the arm64 VM
+daedalus run alpine:latest -d --arch x86_64              # amd64 guest (translated via Rosetta)
+daedalus run alpine:latest -d --arch x86_64 --rosetta    # …explicit Rosetta environment
+daedalus exec <id> -- uname -m                            # → x86_64 (verified live)
+
 # 8. Machines (persistent stateful VMs — init-capable image required)
 daedalus machine create alpine:latest --no-boot -n test-m   # will warn: alpine has no init system
 daedalus machine list
@@ -167,14 +172,19 @@ daedalus system-status                # Daemon + version + container counts
 # Containers
 daedalus run alpine:latest -d         # Create + start (detached, auto-keepalive)
 daedalus run debian:latest -d -p detonation  # Detonation profile for malware analysis
+daedalus run alpine:latest -d --arch x86_64 --rosetta --init --shm-size 64M --ulimit nofile=1024
+                                       # 1.3.1 run surface: multi-arch + resources + PID-1
 daedalus detonate ./suspicious.elf --observe 30   # THE flagship: detonate, report, destroy
 daedalus ls                           # List running
 daedalus ls --all                     # List all (including stopped)
 daedalus inspect <id>                 # Full JSON inspect
-daedalus exec <id> uname -a           # Run command inside
+daedalus exec <id> -- uname -a           # Run command inside ('--' before flag-like commands)
+daedalus exec <id> --workdir /tmp -- pwd # exec options precede the id (wire contract)
 daedalus logs <id>                    # View logs
 daedalus logs <id> --boot             # Boot-time logs
 daedalus destroy <id> --confirm       # Stop + delete
+daedalus stop --all                   # Stop every container (stop -a)
+daedalus destroy --all --confirm      # Delete every container (delete -a)
 daedalus stats                        # One-shot stats for all running containers
 daedalus stats <id>                   # One-shot stats for a single container
 daedalus cp <id>:/tmp/x ./x           # Copy a file out of a container
@@ -231,6 +241,28 @@ daedalus profiles                     # List security profiles
 | `system-status` | Daemon + version + container count |
 | `profiles` | List security profiles |
 
+**1.3.1 run surface** (`run` / `create` — the full 51-flag set, serialised by `RunSpec.to_cli_args()`; exec takes `--workdir/-w`, `--user/-u`, `--uid`, `--gid`, `--tty/-t`, `--interactive/-i`, `--detach/-d`, `--ulimit`, `--env-file`):
+
+| Flag | RunSpec field | Meaning |
+|---|---|---|
+| `--arch <arch>` / `-a` | `arch` | Guest architecture — `x86_64` runs amd64 images on Apple silicon |
+| `--os <os>` | `os` | Guest OS (e.g. `linux`) |
+| `--platform <os/arch/variant>` | `platform` | Takes precedence over `--os`/`--arch` when both are given |
+| `--rosetta` | `rosetta` | Run x86_64 images via Rosetta translation |
+| `--ssh` | `ssh` | Forward the host SSH agent socket into the container |
+| `--init` | `init` | Custom PID-1 (default init image) |
+| `--init-image <image>` | `init_image` | Custom init image (eBPF boot / instrumentation, ariadne) |
+| `--kernel-arg <k=v>` | `kernel_arg` | Kernel command-line argument (repeatable) |
+| `--masked-path <path>` | `masked_path` | Mask a path inside the container (repeatable) |
+| `--read-only-path <path>` | `read_only_path` | Read-only bind path (repeatable) |
+| `--shm-size <size>` | `shm_size` | `/dev/shm` size, e.g. `64M` (inspect reports `shmSize` bytes) |
+| `--ulimit <spec>` | `ulimit` | Ulimit spec, e.g. `nofile=1024` (repeatable; inspect reports the rlimit) |
+| `--publish-socket <spec>` | `publish_socket` | Forward a unix socket into the container (repeatable) |
+| `--virtualization` | `virtualization` | Nested-virtualization exposure |
+| `--runtime <name>` | `runtime` | Runtime handler name |
+
+The 1.2.2 core (cpus, memory, mounts, tmpfs, volumes, kernel, dns family, network, publish, cap-add/drop, read-only, labels, cidfile, scheme, entrypoint, env, user/uid/gid, workdir, interactive/tty, detach, rm, name) remains as before. Multi-arch is verified end-to-end: `daedalus run --arch x86_64` on Apple silicon reports `uname -m` → `x86_64` inside the guest (inspect shows `platform.architecture: amd64`, `rosetta: true`).
+
 ### 2. HTTP API (REST + SSE + WebSocket)
 
 Start the server:
@@ -267,6 +299,8 @@ python -m daedalus.api.server
 | POST | `/networks` | Create a network |
 | GET | `/networks/{name}` | Inspect a network |
 | DELETE | `/networks/{name}` | Delete a network (`?confirm=true` required) |
+| POST | `/containers/stop` | Bulk stop **all** containers (`{"all":true}` → `stop -a`) |
+| POST | `/containers/delete` | Bulk delete **all** containers (`{"all":true,"confirm":true}` → `delete -a`) |
 | POST | `/containers/{id}/stop` | Stop a running container |
 | POST | `/containers/{id}/start` | Start a stopped container |
 | POST | `/containers/{id}/exec` | Execute command (`{"command":["echo","hi"]}`) |
@@ -294,6 +328,16 @@ python -m daedalus.api.server
 The stats history is collected by the server's sampling engine (2 s cadence, derived
 CPU%/delta rates with a 300-point ring per container) and **persists across server
 restarts** at `~/.daedalus/store/stats-history.json` (saved every 10 ticks, load-on-boot).
+
+**Run request fields:** `POST /containers` accepts the full 1.3.1 surface alongside the
+1.2.2 fields — `arch`, `os`, `platform` (precedence over `os`/`arch`), `rosetta`, `ssh`,
+`init`, `init_image`, `kernel_arg` (repeatable), `masked_path` (repeatable),
+`read_only_path` (repeatable), `shm_size`, `ulimit` (repeatable), `publish_socket`
+(repeatable), `virtualization`, `runtime`. `POST /containers/{id}/exec` additionally
+accepts `detached` and `ulimit` (plus the existing `user`/`uid`/`gid`/`workdir`/`env`/
+`tty`/`interactive`). The machine `POST /machines` request carries the machine-run
+surface (`cpus`, `memory`, `no_boot`, …) and `POST /machines/{id}/run` accepts
+`root`/`detached`/`tty`/`user`/`workdir`/`ulimit`.
 
 **curl examples:**
 
@@ -380,14 +424,14 @@ Add to your `mcp.json` or `~/.claude/config.json`:
 | Tool | Description |
 |---|---|
 | `daedalus_health` | Host capability manifest — call first |
-| `daedalus_run` | Create + start container |
+| `daedalus_run` | Create + start container — args include `arch`/`os`/`platform` (multi-arch; `arch="x86_64"` runs amd64 guests on Apple silicon, `rosetta=True` for Rosetta translation), `ssh`, `init`, `init_image`, `kernel_arg`, `masked_path`, `read_only_path`, `shm_size`, `ulimit`, `publish_socket`, `virtualization`, `runtime` |
 | `daedalus_detonate` | The safe-detention verb: detonate a host-local sample in a disposable isolated VM, return the behavioral report + risk score, destroy the VM (`readOnlyHint=false`, `destructiveHint=true` — a VM is created and destroyed; blocks ~30–90 s) |
 | `daedalus_list` | List containers |
 | `daedalus_inspect` | Inspect container |
-| `daedalus_exec` | Execute command inside container |
+| `daedalus_exec` | Execute command inside container (args include `workdir`, `detached`, `ulimit`, `user`/`uid`/`gid`, `env`) |
 | `daedalus_logs` | Fetch container logs |
-| `daedalus_stop` | Stop a running container |
-| `daedalus_destroy` | Destroy container (requires `confirm=true`) |
+| `daedalus_stop` | Stop a running container (`all=true` stops every container — `stop -a`) |
+| `daedalus_destroy` | Destroy container (requires `confirm=true`; `all=true` + `confirm=true` destroys every container — `delete -a`) |
 | `daedalus_stats` | One-shot resource stats (all or one container) |
 | `daedalus_copy` | Copy a file to/from a container |
 | `daedalus_export` | Export a container filesystem to a tar (store-indexed artifact) |
@@ -540,9 +584,9 @@ cd ui && npm run dev
 ## Quality Gates
 
 ```
-mypy --strict daedalus/     → Success: no issues found in 24 source files
-pytest tests/ -q            → 236 passed, 1 skipped (214 unit + 22 integration)
-pytest -m integration       → 22 passed, 1 skipped (requires container daemon)
+mypy --strict daedalus/     → Success: no issues found in 26 source files
+pytest tests/ -q            → 341 passed, 1 skipped (312 unit + 29 integration)
+pytest -m integration       → 29 passed, 1 skipped (requires container daemon)
 Detonation §M7 test         → 2 live detonations: dropper vs no-op reports distinguishable, no leaks
 Proxy across 7 profiles     → All pass (CLI + API + MCP surfaces)
 UI build                    → TypeScript clean, 8/8 checks pass

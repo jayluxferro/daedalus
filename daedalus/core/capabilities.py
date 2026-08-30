@@ -168,6 +168,11 @@ EXPECTED_FLAGS: set[str] = {
     "cidfile", "no-dns", "dns", "dns-domain", "dns-search",
     "dns-option", "label", "disable-progress-updates", "scheme",
     "init-image", "ssh", "debug", "version", "help",
+    # container 1.3.x additions (exhaustive audit, SPEC-phase7 §2)
+    "init", "kernel-arg", "masked-path", "read-only", "read-only-path",
+    "rosetta", "runtime", "shm-size", "ulimit", "publish", "publish-socket",
+    "virtualization", "platform", "network", "cap-add", "cap-drop",
+    "max-concurrent-downloads", "progress",
 }
 
 # Subcommands (not flags) — tracked separately for backend routing.

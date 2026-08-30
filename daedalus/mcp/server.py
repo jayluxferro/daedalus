@@ -210,6 +210,13 @@ Core capabilities:
 - Manage named volumes (persistent disk images) via `daedalus_volume_*`
 - Set the default container kernel via `daedalus_kernel_set`
 
+Multi-arch guests: pass `arch="x86_64"` to `daedalus_run`/`daedalus_create`
+to run amd64 guests on Apple silicon (optionally `rosetta=True` for the
+Rosetta environment); expanded run options include platform, os, ssh,
+init, init_image, kernel_arg, masked_path, read_only_path, shm_size,
+ulimit, publish_socket, virtualization, runtime. `daedalus_stop` and
+`daedalus_destroy` accept `all=True` (destroy still requires confirm).
+
 Safety rules:
 1. ALWAYS call `daedalus_health` first to check what the host supports
 2. Destructive operations (`daedalus_destroy`, `daedalus_prune`,
@@ -284,6 +291,21 @@ async def daedalus_run(
     cert_path: str | None = None,
     no_proxy: str | None = None,
     workdir: str | None = None,
+    arch: str | None = None,
+    os: str | None = None,
+    platform: str | None = None,
+    rosetta: bool = False,
+    ssh: bool = False,
+    init: bool = False,
+    init_image: str | None = None,
+    kernel_arg: list[str] | None = None,
+    masked_path: list[str] | None = None,
+    read_only_path: list[str] | None = None,
+    shm_size: str | None = None,
+    ulimit: list[str] | None = None,
+    publish_socket: list[str] | None = None,
+    virtualization: bool = False,
+    runtime: str | None = None,
     confirm_kernel: bool = False,
     ctx: Context | None = None,
 ) -> str:
@@ -295,10 +317,20 @@ async def daedalus_run(
     Pass --proxy host:port to route traffic through Burp/mitmproxy.
     Pass --cert /path/to/ca.pem to inject a CA certificate.
 
+    Multi-arch guests: on Apple silicon, arch="x86_64" runs amd64
+    images (verify with `uname -m` inside the container); rosetta=True
+    runs them under the Rosetta environment instead of native
+    emulation.  platform (os/arch/variant) takes precedence over
+    os/arch when both are given.  Other expanded run options: ssh,
+    init, init_image, kernel_arg (repeatable), masked_path (repeatable),
+    read_only_path (repeatable), shm_size, ulimit (repeatable),
+    publish_socket (repeatable), virtualization, runtime.
+
     Example:
         daedalus_run(image="alpine:latest")
         daedalus_run(image="ubuntu:24.04", profile="bench", name="test")
         daedalus_run(image="debian:latest", proxy="192.168.64.1:8083", cert_path="/tmp/burp-ca.pem")
+        daedalus_run(image="alpine:latest", arch="x86_64", rosetta=True)
     """
     assert ctx is not None
     dc = _get_ctx(ctx)
@@ -327,6 +359,36 @@ async def daedalus_run(
             overrides["cert_path"] = cert_path
         if no_proxy is not None:
             overrides["no_proxy"] = no_proxy
+        if arch is not None:
+            overrides["arch"] = arch
+        if os is not None:
+            overrides["os"] = os
+        if platform is not None:
+            overrides["platform"] = platform
+        if rosetta:
+            overrides["rosetta"] = True
+        if ssh:
+            overrides["ssh"] = True
+        if init:
+            overrides["init"] = True
+        if init_image is not None:
+            overrides["init_image"] = init_image
+        if kernel_arg is not None:
+            overrides["kernel_arg"] = kernel_arg
+        if masked_path is not None:
+            overrides["masked_path"] = masked_path
+        if read_only_path is not None:
+            overrides["read_only_path"] = read_only_path
+        if shm_size is not None:
+            overrides["shm_size"] = shm_size
+        if ulimit is not None:
+            overrides["ulimit"] = ulimit
+        if publish_socket is not None:
+            overrides["publish_socket"] = publish_socket
+        if virtualization:
+            overrides["virtualization"] = True
+        if runtime is not None:
+            overrides["runtime"] = runtime
         overrides["remove"] = remove
         kwargs = p.apply(**overrides)
         await ctx.report_progress(10, 100, "Creating container...")
@@ -373,10 +435,32 @@ async def daedalus_create(
     cert_path: str | None = None,
     no_proxy: str | None = None,
     workdir: str | None = None,
+    arch: str | None = None,
+    os: str | None = None,
+    platform: str | None = None,
+    rosetta: bool = False,
+    ssh: bool = False,
+    init: bool = False,
+    init_image: str | None = None,
+    kernel_arg: list[str] | None = None,
+    masked_path: list[str] | None = None,
+    read_only_path: list[str] | None = None,
+    shm_size: str | None = None,
+    ulimit: list[str] | None = None,
+    publish_socket: list[str] | None = None,
+    virtualization: bool = False,
+    runtime: str | None = None,
     confirm_kernel: bool = False,
     ctx: Context | None = None,
 ) -> str:
-    """Create a stopped container. Use daedalus_start to run it later."""
+    """Create a stopped container. Use daedalus_start to run it later.
+
+    Accepts the same expanded run options as daedalus_run (arch, os,
+    platform, rosetta, ssh, init, init_image, kernel_arg, masked_path,
+    read_only_path, shm_size, ulimit, publish_socket, virtualization,
+    runtime).  On Apple silicon, arch="x86_64" prepares an amd64 guest;
+    rosetta=True runs it under the Rosetta environment.
+    """
     assert ctx is not None
     dc = _get_ctx(ctx)
     try:
@@ -404,6 +488,36 @@ async def daedalus_create(
             overrides["cert_path"] = cert_path
         if no_proxy is not None:
             overrides["no_proxy"] = no_proxy
+        if arch is not None:
+            overrides["arch"] = arch
+        if os is not None:
+            overrides["os"] = os
+        if platform is not None:
+            overrides["platform"] = platform
+        if rosetta:
+            overrides["rosetta"] = True
+        if ssh:
+            overrides["ssh"] = True
+        if init:
+            overrides["init"] = True
+        if init_image is not None:
+            overrides["init_image"] = init_image
+        if kernel_arg is not None:
+            overrides["kernel_arg"] = kernel_arg
+        if masked_path is not None:
+            overrides["masked_path"] = masked_path
+        if read_only_path is not None:
+            overrides["read_only_path"] = read_only_path
+        if shm_size is not None:
+            overrides["shm_size"] = shm_size
+        if ulimit is not None:
+            overrides["ulimit"] = ulimit
+        if publish_socket is not None:
+            overrides["publish_socket"] = publish_socket
+        if virtualization:
+            overrides["virtualization"] = True
+        if runtime is not None:
+            overrides["runtime"] = runtime
         overrides["remove"] = remove
         kwargs = p.apply(**overrides)
         lab = await dc.forge.create(
@@ -473,12 +587,24 @@ async def daedalus_stop(
     container_id: str,
     timeout: int = 10,
     signal: str | None = None,
+    all: bool = False,
     ctx: Context | None = None,
 ) -> str:
-    """Stop a running container gracefully (SIGTERM + timeout)."""
+    """Stop a running container gracefully (SIGTERM + timeout).
+
+    all=True stops every running container (stop -a; container_id is
+    ignored in this mode).
+    """
     assert ctx is not None
     dc = _get_ctx(ctx)
     try:
+        if all:
+            # Forge.stop is single-container only (SPEC phase 7 §4) —
+            # call the backend accessor directly for `stop -a`.
+            await dc.backend.stop(container_id, timeout=timeout,
+                                  signal=signal, all=True)
+            _audit_agent(dc, "stop", {"container_id": container_id, "all": True})
+            return _ok({"all": True, "state": "stopped"})
         lab = await dc.forge.stop(container_id, timeout=timeout, signal=signal)
         _audit_agent(dc, "stop", {"container_id": container_id})
         return _ok({"id": lab.id, "state": lab.state})
@@ -547,15 +673,31 @@ async def daedalus_start(
 async def daedalus_destroy(
     container_id: str,
     confirm: bool = False,
+    all: bool = False,
     ctx: Context | None = None,
 ) -> str:
     """Destroy a container (stop then delete permanently).
 
     **WARNING**: Destructive operation. Must pass confirm=True.
     Container data is unrecoverable after destruction.
+    all=True destroys every container (delete -a; container_id is
+    ignored) and stays confirm-gated: confirm=True is required.
     """
+    if all and not confirm:
+        raise ValueError(json.dumps({
+            "error": "confirm=True required to destroy all containers",
+            "code": "CONFIRM_REQUIRED",
+        }))
     dc = _get_ctx(ctx)
     try:
+        if all:
+            # Forge.destroy is single-container only (SPEC phase 7 §4) —
+            # call the backend accessor directly for `delete -a`, still
+            # behind the confirm gate above.
+            await dc.backend.delete(container_id, all=True)
+            _audit_agent(dc, "destroy", {"container_id": container_id,
+                                         "confirm": confirm, "all": True})
+            return _ok({"all": True, "destroyed": True})
         report = await dc.forge.destroy(container_id, confirm=confirm)
         _audit_agent(dc, "destroy", {"container_id": container_id, "confirm": confirm})
         payload: dict[str, object] = {"id": container_id, "destroyed": True}
@@ -590,10 +732,14 @@ async def daedalus_exec(
     env_file: str | None = None,
     tty: bool = False,
     interactive: bool = False,
+    detached: bool = False,
+    ulimit: list[str] | None = None,
     ctx: Context | None = None,
 ) -> str:
     """Execute a command inside a running container.
 
+    detached=True runs the exec in the background (exec -d).
+    ulimit accepts repeatable resource specs (e.g. "nofile=1024").
     Returns {exit_code, stdout, stderr} as JSON.
     """
     dc = _get_ctx(ctx)
@@ -601,6 +747,7 @@ async def daedalus_exec(
         opts = ExecOptions(
             user=user, uid=uid, gid=gid, workdir=workdir, env=env,
             env_file=env_file, tty=tty, interactive=interactive,
+            detached=detached, ulimit=ulimit,
         )
         result = await dc.icarus.exec(container_id, command, options=opts)
         _audit_agent(dc, "exec", {"container_id": container_id, "command": command})
@@ -1838,6 +1985,12 @@ async def daedalus_machine_delete(
 async def daedalus_machine_run(
     machine_id: str,
     command: str,
+    root: bool = False,
+    ulimit: list[str] | None = None,
+    detached: bool = False,
+    tty: bool = False,
+    user: str | None = None,
+    workdir: str | None = None,
     ctx: Context | None = None,
 ) -> str:
     """Run a command inside a container machine (boots it if necessary).
@@ -1846,13 +1999,25 @@ async def daedalus_machine_run(
     {exit_code, stdout, stderr} as JSON.  When the machine fails to boot
     (non-zero exit code), an ``explanation`` field describes the likely
     cause (e.g. the image has no init system).
+
+    Options: root=True runs as root, detached=True runs in the
+    background, tty=True allocates a pseudo-TTY, user overrides the
+    user, workdir sets the working directory, ulimit accepts repeatable
+    resource specs (e.g. "nofile=1024").
     """
     dc = _get_ctx(ctx)
     try:
         argv = shlex.split(command)
         if not argv:
             return _err(ValidationError("command required"))
-        result = await dc.machina.run(machine_id, argv)
+        # Machina.run does not thread root/ulimit/detached/tty/user/workdir
+        # (SPEC phase 7 §4) — call the backend accessor directly; the MCP
+        # layer audits below, so machina's own audit record is not lost.
+        result = await dc.backend.machine_run(
+            machine_id, argv,
+            root=root, ulimit=ulimit, detached=detached,
+            tty=tty, user=user, workdir=workdir,
+        )
         _audit_agent(dc, "machine_run", {
             "machine_id": machine_id, "argv": argv,
         })
@@ -1881,12 +2046,25 @@ async def daedalus_machine_run(
     ),
 )
 async def daedalus_machine_logs(
-    machine_id: str, ctx: Context | None = None,
+    machine_id: str,
+    boot: bool = False,
+    follow: bool = False,
+    tail: int | None = None,
+    ctx: Context | None = None,
 ) -> str:
-    """Retrieve a container machine's boot/stdout logs as raw text."""
+    """Retrieve a container machine's boot/stdout logs as raw text.
+
+    boot=True returns kernel/boot messages; tail limits to the last N
+    lines.  When follow=True, output is bounded to a short window
+    (~15 s) like the container logs tool, then returned as a snapshot.
+    """
     dc = _get_ctx(ctx)
     try:
-        return await dc.machina.logs(machine_id)
+        # Machina.logs does not thread boot/follow/tail (SPEC phase 7 §4)
+        # — call the backend accessor directly (read-only, no audit).
+        return await dc.backend.machine_logs(
+            machine_id, boot=boot, follow=follow, tail=tail,
+        )
     except DaedalusError as e:
         return _err(e)
 

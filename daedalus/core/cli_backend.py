@@ -414,21 +414,36 @@ async def _run_cli_impl(
     binary: str = "container",
     timeout: float = 60.0,
     check: bool = True,
+    input_text: str | None = None,
 ) -> tuple[int, str, str]:
     """Run ``container`` and return ``(exit_code, stdout, stderr)``.
+
+    When ``input_text`` is given, it is fed to the process's stdin
+    (stdin is piped only then — existing call sites keep the exact same
+    subprocess shape).  Used for ``registry login --password-stdin``.
 
     Raises :class:`BackendTimeoutError` on timeout,
     :class:`BackendError` on non-zero exit (if ``check=True``).
     """
     try:
-        proc = await asyncio.create_subprocess_exec(
-            binary, *args,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
+        if input_text is None:
+            proc = await asyncio.create_subprocess_exec(
+                binary, *args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdin: bytes | None = None
+        else:
+            proc = await asyncio.create_subprocess_exec(
+                binary, *args,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdin = input_text.encode()
         try:
             stdout, stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=timeout,
+                proc.communicate(input=stdin), timeout=timeout,
             )
         except TimeoutError:
             proc.kill()
@@ -563,10 +578,15 @@ class CliBackend(Backend):
     async def stop(
         self,
         container_id: str,
-        timeout: int = 10,
         *,
+        timeout: int = 10,
         signal: str | None = None,
+        all: bool = False,
     ) -> None:
+        if all:
+            # stop -a — container_id is ignored/empty in this mode.
+            await _run_cli_impl("stop", "-a", binary=self._binary)
+            return
         cmd = ["stop", container_id, "-t", str(timeout)]
         if signal:
             cmd += ["--signal", signal]
@@ -580,7 +600,13 @@ class CliBackend(Backend):
         else:
             await _run_cli_impl("kill", container_id, binary=self._binary)
 
-    async def delete(self, container_id: str, force: bool = False) -> None:
+    async def delete(
+        self, container_id: str, *, force: bool = False, all: bool = False,
+    ) -> None:
+        if all:
+            # delete -a — container_id is ignored/empty in this mode.
+            await _run_cli_impl("delete", "-a", binary=self._binary)
+            return
         cmd = ["delete", container_id]
         if force:
             cmd.append("--force")
@@ -770,6 +796,12 @@ class CliBackend(Backend):
         gid: int | None = None,
         interactive: bool = False,
         timeout: float = 60.0,
+        root: bool = False,
+        ulimit: builtins.list[str] | None = None,
+        detached: bool = False,
+        tty: bool = False,
+        user: str | None = None,
+        workdir: str | None = None,
     ) -> ExecResult:
         self._require("container_machines")
         cmd = ["machine", "run", "-n", machine_id]
@@ -780,6 +812,19 @@ class CliBackend(Backend):
             cmd += ["--gid", str(gid)]
         if interactive:
             cmd.append("-i")
+        if root:
+            cmd.append("--root")
+        if ulimit is not None:
+            for u in ulimit:
+                cmd += ["--ulimit", u]
+        if detached:
+            cmd.append("-d")
+        if tty:
+            cmd.append("-t")
+        if user:
+            cmd += ["-u", user]
+        if workdir:
+            cmd += ["-w", workdir]
         cmd += argv
         # check=False — run captures the command's exit code, not the CLI's.
         exit_code, out, err = await _run_cli_impl(
@@ -787,11 +832,27 @@ class CliBackend(Backend):
         )
         return ExecResult(exit_code=exit_code, stdout=out, stderr=err)
 
-    async def machine_logs(self, machine_id: str) -> str:
+    async def machine_logs(
+        self,
+        machine_id: str,
+        *,
+        boot: bool = False,
+        follow: bool = False,
+        tail: int | None = None,
+    ) -> str:
         self._require("container_machines")
-        _, out, _ = await _run_cli_impl(
-            "machine", "logs", machine_id, binary=self._binary,
-        )
+        cmd = ["machine", "logs", machine_id]
+        if boot:
+            cmd.append("--boot")
+        if follow:
+            cmd.append("-f")
+        if tail is not None:
+            cmd += ["-n", str(tail)]
+        if follow:
+            return await _run_cli_bounded(
+                *cmd, binary=self._binary, duration=15.0,
+            )
+        _, out, _ = await _run_cli_impl(*cmd, binary=self._binary)
         return out
 
     # ==================================================================
@@ -851,22 +912,33 @@ class CliBackend(Backend):
         uid: int | None = None,
         gid: int | None = None,
         tty: bool = False,
+        interactive: bool = False,
+        detached: bool = False,
+        ulimit: builtins.list[str] | None = None,
         workdir: str | None = None,
         env_file: str | None = None,
-        interactive: bool = False,
         timeout: float = 30.0,
     ) -> ExecResult:
-        cmd = ["exec", container_id]
+        # Option flags must PRECEDE the container id: container ≥ 1.x treats
+        # every argument after <id> as the executable + its arguments (there
+        # is no `--` separator).  Verified live: `container exec -t <id> ...`
+        # works, `<id> -t ...` fails with "target executable" errors.
+        cmd = ["exec"]
         if tty:
             cmd.append("--tty")
         if interactive or tty:
             cmd.append("--interactive")
+        if detached:
+            cmd.append("-d")
         if user:
             cmd += ["--user", user]
         if uid is not None:
             cmd += ["--uid", str(uid)]
         if gid is not None:
             cmd += ["--gid", str(gid)]
+        if ulimit is not None:
+            for u in ulimit:
+                cmd += ["--ulimit", u]
         if workdir:
             cmd += ["--workdir", workdir]
         if env_file:
@@ -874,8 +946,7 @@ class CliBackend(Backend):
         if env:
             for k, v in env.items():
                 cmd += ["--env", f"{k}={v}"]
-        # container exec does NOT use -- separator; args after container-id
-        # are the command directly.
+        cmd.append(container_id)
         cmd += argv
 
         exit_code, out, err = await _run_cli_impl(
@@ -982,17 +1053,20 @@ class CliBackend(Backend):
         server: str,
         username: str | None = None,
         password: str | None = None,
+        password_stdin: str | None = None,
         scheme: str | None = None,
     ) -> None:
         cmd = ["registry", "login"]
         if username:
-            cmd += ["--username", username]
+            cmd += ["-u", username]
         if scheme:
             cmd += ["--scheme", scheme]
-        if password is not None:
+        if password is not None or password_stdin is not None:
             cmd.append("--password-stdin")
         cmd.append(server)
         if password is not None:
+            # Existing password path: feed --password-stdin directly via a
+            # dedicated subprocess (kept identical to pre-phase-7 behavior).
             proc = await asyncio.create_subprocess_exec(
                 self._binary, *cmd,
                 stdin=asyncio.subprocess.PIPE,
@@ -1006,6 +1080,9 @@ class CliBackend(Backend):
                     exit_code=proc.returncode or 1,
                     stderr=stderr.decode("utf-8", errors="replace").strip()[:500],
                 )
+            return
+        if password_stdin is not None:
+            await _run_cli_impl(*cmd, binary=self._binary, input_text=password_stdin)
             return
         await _run_cli_impl(*cmd, binary=self._binary)
 

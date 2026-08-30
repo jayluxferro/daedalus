@@ -130,26 +130,47 @@ export function useDeleteMachine() {
   })
 }
 
-export function runMachine(id: string, command: string[]) {
-  return apiPost<MachineRunResult>(`/machines/${encodeURIComponent(id)}/run`, { command })
+/** POST /machines/{id}/run body (1.3.1 machine-run surface: root, ulimit, detached, tty, user, workdir). */
+export interface MachineRunBody {
+  command: string[]
+  root?: boolean
+  ulimit?: string[]
+  detached?: boolean
+  tty?: boolean
+  user?: string
+  workdir?: string
+}
+
+/** GET /machines/{id}/logs query options (1.3.1: boot, tail). */
+export interface MachineLogsQuery {
+  boot?: boolean
+  tail?: number
+}
+
+export function runMachine(id: string, body: MachineRunBody) {
+  return apiPost<MachineRunResult>(`/machines/${encodeURIComponent(id)}/run`, body)
 }
 
 export function useRunMachine() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: ({ id, command }: { id: string; command: string[] }) => runMachine(id, command),
+    mutationFn: ({ id, body }: { id: string; body: MachineRunBody }) => runMachine(id, body),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['machines'] }),
   })
 }
 
-export function getMachineLogs(id: string) {
-  return apiGet<{ logs: string }>(`/machines/${encodeURIComponent(id)}/logs`)
+export function getMachineLogs(id: string, opts: MachineLogsQuery = {}) {
+  const params = new URLSearchParams()
+  if (opts.boot) params.set('boot', 'true')
+  if (opts.tail !== undefined && opts.tail > 0) params.set('tail', String(opts.tail))
+  const qs = params.toString()
+  return apiGet<{ logs: string }>(`/machines/${encodeURIComponent(id)}/logs${qs ? '?' + qs : ''}`)
 }
 
-export function useMachineLogs(id: string | null) {
+export function useMachineLogs(id: string | null, opts: MachineLogsQuery = {}) {
   return useQuery({
-    queryKey: ['machine-logs', id],
-    queryFn: () => getMachineLogs(id!),
+    queryKey: ['machine-logs', id, opts.boot ?? false, opts.tail ?? null],
+    queryFn: () => getMachineLogs(id!, opts),
     enabled: !!id,
   })
 }

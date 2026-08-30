@@ -3,8 +3,8 @@ import { Terminal as XTerm } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebglAddon } from '@xterm/addon-webgl'
 import '@xterm/xterm/css/xterm.css'
-import { useCopyFile } from '../api/containers'
-import type { CopyDirection } from '../api/containers'
+import { useCopyFile, execContainer } from '../api/containers'
+import type { CopyDirection, ExecRequest } from '../api/containers'
 import { Box, GlassBox } from './shared'
 
 const inputStyle: React.CSSProperties = {
@@ -29,6 +29,41 @@ interface TerminalViewProps {
 
 const PROMPT = '\x1b[36mλ \x1b[0m'
 
+interface ExecOptionField {
+  key: string
+  label: string
+  kind: 'text' | 'bool' | 'repeat'
+  placeholder?: string
+}
+
+// Exec-option registry (SPEC phase 7 §7: detach, ulimit, user, workdir).
+// Same data-driven pattern as the Containers create modal: renders the
+// collapsible controls and folds values into the exec request body.
+const EXEC_OPTION_FIELDS: ExecOptionField[] = [
+  { key: 'detach', label: 'Detach (run in background)', kind: 'bool' },
+  { key: 'user', label: 'User', kind: 'text', placeholder: 'e.g. root' },
+  { key: 'workdir', label: 'Workdir', kind: 'text', placeholder: 'e.g. /app' },
+  { key: 'ulimit', label: 'Ulimits', kind: 'repeat', placeholder: 'nofile=1024 (comma/newline separated)' },
+]
+
+/** Fold registry values into an exec-body dict; empty values are omitted. */
+function foldExecFields(vals: Record<string, string | boolean>): Partial<ExecRequest> {
+  const out: Record<string, unknown> = {}
+  for (const f of EXEC_OPTION_FIELDS) {
+    const v = vals[f.key]
+    if (f.kind === 'bool') {
+      if (v === true) out[f.key] = true
+    } else if (f.kind === 'repeat') {
+      const list = String(v ?? '').split(/[,\n]/).map(s => s.trim()).filter(Boolean)
+      if (list.length) out[f.key] = list
+    } else {
+      const s = String(v ?? '').trim()
+      if (s) out[f.key] = s
+    }
+  }
+  return out as Partial<ExecRequest>
+}
+
 export default function TerminalView({ containerId, onClose }: TerminalViewProps) {
   const termRef = useRef<HTMLDivElement>(null)
   const term = useRef<XTerm | null>(null)
@@ -43,6 +78,8 @@ export default function TerminalView({ containerId, onClose }: TerminalViewProps
   const [dstPath, setDstPath] = useState('')
   const [copyResult, setCopyResult] = useState<string | null>(null)
   const copy = useCopyFile()
+  const [showExec, setShowExec] = useState(false)
+  const [execVals, setExecVals] = useState<Record<string, string | boolean>>({})
 
   const send = useCallback(async (cmd: string) => {
     if (cmd === 'exit' || cmd === 'logout') {
@@ -60,16 +97,11 @@ export default function TerminalView({ containerId, onClose }: TerminalViewProps
       execCmd = cmd
     }
     try {
-      const res = await fetch(`/containers/${containerId}/exec`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ command: ['sh', '-c', execCmd], timeout: 10 }),
+      const data = await execContainer(containerId, {
+        command: ['sh', '-c', execCmd],
+        timeout: 10,
+        ...foldExecFields(execVals),
       })
-      if (!res.ok) {
-        term.current?.writeln(`\r\n\x1b[31mError: ${res.status}\x1b[0m`)
-        return
-      }
-      const data = await res.json()
       if (data.stdout) {
         for (const line of data.stdout.split('\n')) {
           term.current?.writeln('\r' + line)
@@ -90,7 +122,7 @@ export default function TerminalView({ containerId, onClose }: TerminalViewProps
       term.current?.write('\r\n' + PROMPT)
       lineBuf.current = ''
     }
-  }, [containerId, onClose])
+  }, [containerId, onClose, execVals])
 
   useEffect(() => {
     const t = new XTerm({
@@ -213,6 +245,30 @@ export default function TerminalView({ containerId, onClose }: TerminalViewProps
         width: '100%', height: 'calc(100vh - 200px)', minHeight: 400,
         borderRadius: 8, overflow: 'hidden',
       }} />
+
+      <GlassBox style={{ marginTop: 12, padding: 12 }}>
+        <button
+          onClick={() => setShowExec(!showExec)}
+          style={{ background: 'transparent', border: 'none', color: '#3b82f6', cursor: 'pointer', fontSize: 12, padding: 0, fontWeight: 500 }}
+        >
+          {showExec ? '▾ Hide exec options' : '▸ Exec options'}
+        </button>
+        {showExec && (
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 12 }}>
+            {EXEC_OPTION_FIELDS.map(f => f.kind === 'bool' ? (
+              <label key={f.key} style={{ fontSize: 11, color: 'var(--muted-fg)', display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                <input type="checkbox" checked={execVals[f.key] === true} onChange={e => setExecVals(v => ({ ...v, [f.key]: e.target.checked }))} />
+                {f.label}
+              </label>
+            ) : (
+              <label key={f.key} style={{ fontSize: 11, color: 'var(--muted-fg)', display: 'flex', flexDirection: 'column', gap: 4 }}>
+                {f.label}
+                <input value={String(execVals[f.key] ?? '')} onChange={e => setExecVals(v => ({ ...v, [f.key]: e.target.value }))} placeholder={f.placeholder} style={inputStyle} />
+              </label>
+            ))}
+          </div>
+        )}
+      </GlassBox>
 
       <GlassBox style={{ marginTop: 12, padding: 12 }}>
         <button

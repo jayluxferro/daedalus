@@ -7,9 +7,12 @@ shapes captured in SPEC §2 on container 1.2.2.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from daedalus.core.backend import (
+    BuildSpec,
     MachineCreateSpec,
     MachineInfo,
     MachineSetSettings,
@@ -751,3 +754,402 @@ class TestRunSpecInitImageSsh:
         spec = RunSpec(image="alpine:latest", init_image="i:1", ssh=True)
         args = spec.to_cli_args()
         assert args.index("--init-image") < args.index("--ssh") < args.index("alpine:latest")
+
+
+# ------------------------------------------------------------------
+# RunSpec phase-7 completion (SPEC phase 7 §3 — container 1.3.1)
+# ------------------------------------------------------------------
+
+
+class TestRunSpecCompletion:
+    def test_defaults_emit_nothing(self) -> None:
+        args = RunSpec(image="alpine:latest").to_cli_args()
+        for flag in (
+            "--init", "--kernel-arg", "--masked-path", "--read-only-path",
+            "--rosetta", "--runtime", "--shm-size", "--ulimit",
+            "--publish-socket", "--virtualization", "--platform", "--ssh",
+        ):
+            assert flag not in args
+        assert args == ["alpine:latest"]
+
+    def test_every_new_field_emitted_when_set(self) -> None:
+        spec = RunSpec(
+            image="alpine:latest",
+            init=True,
+            kernel_arg=["tracing.bpf=1"],
+            masked_path=["/proc/kcore"],
+            read_only_path=["/var/run"],
+            rosetta=True,
+            runtime="apple-silicon",
+            shm_size="64M",
+            ulimit=["nofile=1024"],
+            publish_socket=["/var/run/docker.sock:/run/docker.sock"],
+            virtualization=True,
+            platform="linux/arm64",
+        )
+        args = spec.to_cli_args()
+        assert "--init" in args
+        assert args[args.index("--kernel-arg") + 1] == "tracing.bpf=1"
+        assert args[args.index("--masked-path") + 1] == "/proc/kcore"
+        assert args[args.index("--read-only-path") + 1] == "/var/run"
+        assert "--rosetta" in args
+        assert args[args.index("--runtime") + 1] == "apple-silicon"
+        assert args[args.index("--shm-size") + 1] == "64M"
+        assert args[args.index("--ulimit") + 1] == "nofile=1024"
+        assert (
+            args[args.index("--publish-socket") + 1]
+            == "/var/run/docker.sock:/run/docker.sock"
+        )
+        assert "--virtualization" in args
+        assert args[args.index("--platform") + 1] == "linux/arm64"
+        assert args[-1] == "alpine:latest"
+
+    def test_repeatable_flags_emit_in_order(self) -> None:
+        spec = RunSpec(
+            image="alpine:latest",
+            kernel_arg=["k1=v1", "k2=v2"],
+            masked_path=["/a", "/b"],
+            read_only_path=["/c", "/d"],
+            ulimit=["nofile=1024", "cpu=2"],
+            publish_socket=["s1", "s2"],
+        )
+        args = spec.to_cli_args()
+        for flag, values in (
+            ("--kernel-arg", ["k1=v1", "k2=v2"]),
+            ("--masked-path", ["/a", "/b"]),
+            ("--read-only-path", ["/c", "/d"]),
+            ("--ulimit", ["nofile=1024", "cpu=2"]),
+            ("--publish-socket", ["s1", "s2"]),
+        ):
+            idxs = [i for i, a in enumerate(args) if a == flag]
+            assert len(idxs) == len(values)
+            assert [args[i + 1] for i in idxs] == values
+
+    def test_emission_order(self) -> None:
+        spec = RunSpec(
+            image="alpine:latest",
+            shm_size="64M",
+            ulimit=["nofile=1024"],
+            masked_path=["/proc/kcore"],
+            read_only=True,
+            read_only_path=["/var/run"],
+            platform="linux/arm64",
+            os="linux",
+            arch="arm64",
+            runtime="apple-silicon",
+            init=True,
+            init_image="init:1",
+            kernel_arg=["k=v"],
+            rosetta=True,
+            virtualization=True,
+            network="victim-net",
+            publish=["8080:80"],
+            publish_socket=["/sock:/sock"],
+            ssh=True,
+        )
+        args = spec.to_cli_args()
+        # resources → filesystem → platform → runtime → network → ssh → image
+        assert (
+            args.index("--shm-size")
+            < args.index("--ulimit")
+            < args.index("--masked-path")
+        )
+        assert args.index("--masked-path") < args.index("--read-only")
+        # read_only_path immediately follows the --read-only flag
+        assert args.index("--read-only-path") == args.index("--read-only") + 1
+        assert args.index("--read-only-path") < args.index("--platform")
+        # platform precedes os/arch
+        assert args.index("--platform") < args.index("--os") < args.index("--arch")
+        # runtime/instrumentation section: after platform, before network
+        assert args.index("--arch") < args.index("--runtime")
+        assert (
+            args.index("--runtime")
+            < args.index("--init")
+            < args.index("--init-image")
+            < args.index("--kernel-arg")
+            < args.index("--rosetta")
+            < args.index("--virtualization")
+        )
+        assert args.index("--virtualization") < args.index("--network")
+        # publish_socket after publish; ssh after the network section
+        assert args.index("-p") < args.index("--publish-socket") < args.index("--ssh")
+        assert args.index("--ssh") < args.index("alpine:latest")
+
+    def test_platform_takes_precedence_over_os_arch(self) -> None:
+        spec = RunSpec(
+            image="alpine:latest", platform="linux/x86_64", os="linux", arch="x86_64",
+        )
+        args = spec.to_cli_args()
+        assert args[args.index("--platform") + 1] == "linux/x86_64"
+        assert args.index("--platform") < args.index("--os") < args.index("--arch")
+
+
+# ------------------------------------------------------------------
+# BuildSpec phase-7 completion (SPEC phase 7 §2 — container 1.3.1)
+# ------------------------------------------------------------------
+
+
+class TestBuildSpecCompletion:
+    def test_defaults_emit_context_only(self) -> None:
+        args = BuildSpec().to_cli_args()
+        assert "--secret" not in args
+        assert "--ssh" not in args
+        assert "--pull" not in args
+        assert args == ["."]
+
+    def test_secret_ssh_pull_vsock_emitted(self) -> None:
+        spec = BuildSpec(
+            secret=["id=mysecret,src=/tmp/secret", "id=other,src=/tmp/other"],
+            ssh=True,
+            pull=True,
+            vsock_port=61234,
+        )
+        args = spec.to_cli_args()
+        idxs = [i for i, a in enumerate(args) if a == "--secret"]
+        assert [args[i + 1] for i in idxs] == [
+            "id=mysecret,src=/tmp/secret",
+            "id=other,src=/tmp/other",
+        ]
+        assert "--ssh" in args
+        assert "--pull" in args
+        assert args[args.index("--vsock-port") + 1] == "61234"
+        # all flags precede the build context
+        assert args[-1] == "."
+
+    def test_flag_order_secret_ssh_pull_before_context(self) -> None:
+        spec = BuildSpec(secret=["a=1"], ssh=True, pull=True, context="src/")
+        args = spec.to_cli_args()
+        assert (
+            args.index("--secret")
+            < args.index("--ssh")
+            < args.index("--pull")
+            < args.index("src/")
+        )
+
+
+# ------------------------------------------------------------------
+# Wire-level verb extensions (no daemon — _run_cli_impl is faked)
+# ------------------------------------------------------------------
+
+
+class _RecordingCli:
+    """Fake ``_run_cli_impl`` capturing ``(args, kwargs)`` per invocation."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[tuple[str, ...], dict[str, Any]]] = []
+
+    async def __call__(
+        self, *args: str, **kwargs: Any,
+    ) -> tuple[int, str, str]:
+        self.calls.append((args, kwargs))
+        return (0, "", "")
+
+
+@pytest.fixture
+def rec(monkeypatch: pytest.MonkeyPatch) -> _RecordingCli:
+    """Patch ``_run_cli_impl`` so CliBackend verbs are testable without a daemon."""
+    recorder = _RecordingCli()
+    monkeypatch.setattr("daedalus.core.cli_backend._run_cli_impl", recorder)
+    return recorder
+
+
+def _backend(runtime_features: dict[str, bool | str] | None = None) -> CliBackend:
+    return CliBackend(
+        CapabilityManifest(
+            container_binary="/usr/local/bin/container",
+            container_version="1.3.1",
+            runtime_features=runtime_features or {},
+        )
+    )
+
+
+class TestExecWireOptions:
+    """CliBackend.exec ``-d`` / ``--ulimit`` emission (SPEC phase 7 §2)."""
+
+    async def test_defaults_emit_no_new_flags(self, rec: _RecordingCli) -> None:
+        result = await _backend().exec("c1", ["echo", "hi"])
+        assert result.exit_code == 0
+        (cmd, _), = rec.calls
+        assert "-d" not in cmd
+        assert "--ulimit" not in cmd
+
+    async def test_detached_emits_d(self, rec: _RecordingCli) -> None:
+        await _backend().exec("c1", ["echo", "hi"], detached=True)
+        (cmd, _), = rec.calls
+        assert "-d" in cmd
+        assert cmd[cmd.index("-d")] == "-d"
+
+    async def test_ulimit_repeatable(self, rec: _RecordingCli) -> None:
+        await _backend().exec(
+            "c1", ["echo", "hi"], ulimit=["nofile=1024", "cpu=2"],
+        )
+        (cmd, _), = rec.calls
+        idxs = [i for i, a in enumerate(cmd) if a == "--ulimit"]
+        assert len(idxs) == 2
+        assert [cmd[i + 1] for i in idxs] == ["nofile=1024", "cpu=2"]
+        # argv is the tail of the command
+        assert cmd[-2:] == ("echo", "hi")
+
+
+class TestStopDeleteWire:
+    """CliBackend.stop/delete ``-a`` (SPEC phase 7 §2)."""
+
+    async def test_stop_all(self, rec: _RecordingCli) -> None:
+        await _backend().stop("", all=True)
+        (cmd, _), = rec.calls
+        assert cmd == ("stop", "-a")
+
+    async def test_stop_defaults(self, rec: _RecordingCli) -> None:
+        await _backend().stop("c1")
+        (cmd, _), = rec.calls
+        assert cmd == ("stop", "c1", "-t", "10")
+
+    async def test_stop_signal(self, rec: _RecordingCli) -> None:
+        await _backend().stop("c1", signal="TERM")
+        (cmd, _), = rec.calls
+        assert cmd == ("stop", "c1", "-t", "10", "--signal", "TERM")
+
+    async def test_delete_all(self, rec: _RecordingCli) -> None:
+        await _backend().delete("", all=True)
+        (cmd, _), = rec.calls
+        assert cmd == ("delete", "-a")
+
+    async def test_delete_force(self, rec: _RecordingCli) -> None:
+        await _backend().delete("c1", force=True)
+        (cmd, _), = rec.calls
+        assert cmd == ("delete", "c1", "--force")
+
+    async def test_delete_defaults(self, rec: _RecordingCli) -> None:
+        await _backend().delete("c1")
+        (cmd, _), = rec.calls
+        assert cmd == ("delete", "c1")
+
+
+class TestMachineRunWire:
+    """CliBackend.machine_run new flags (SPEC phase 7 §2)."""
+
+    async def test_new_flags_emitted(self, rec: _RecordingCli) -> None:
+        backend = _backend({"container_machines": True})
+        result = await backend.machine_run(
+            "m1", ["uname", "-m"],
+            root=True,
+            ulimit=["nofile=1024"],
+            detached=True,
+            tty=True,
+            user="root",
+            workdir="/tmp",
+        )
+        assert result.exit_code == 0
+        (cmd, _), = rec.calls
+        assert cmd[:4] == ("machine", "run", "-n", "m1")
+        assert "--root" in cmd
+        assert cmd[cmd.index("--ulimit") + 1] == "nofile=1024"
+        assert "-d" in cmd
+        assert "-t" in cmd
+        assert cmd[cmd.index("-u") + 1] == "root"
+        assert cmd[cmd.index("-w") + 1] == "/tmp"
+        assert cmd[-2:] == ("uname", "-m")
+
+    async def test_defaults_emit_no_new_flags(self, rec: _RecordingCli) -> None:
+        backend = _backend({"container_machines": True})
+        await backend.machine_run("m1", ["id"])
+        (cmd, _), = rec.calls
+        assert cmd == ("machine", "run", "-n", "m1", "id")
+
+    async def test_ulimit_repeatable(self, rec: _RecordingCli) -> None:
+        backend = _backend({"container_machines": True})
+        await backend.machine_run("m1", ["id"], ulimit=["nofile=1024", "cpu=2"])
+        (cmd, _), = rec.calls
+        idxs = [i for i, a in enumerate(cmd) if a == "--ulimit"]
+        assert [cmd[i + 1] for i in idxs] == ["nofile=1024", "cpu=2"]
+
+
+class TestMachineLogsWire:
+    """CliBackend.machine_logs --boot/-f/-n (SPEC phase 7 §2)."""
+
+    async def test_boot_and_tail_emitted(self, rec: _RecordingCli) -> None:
+        backend = _backend({"container_machines": True})
+        out = await backend.machine_logs("m1", boot=True, tail=50)
+        assert out == ""
+        (cmd, _), = rec.calls
+        assert cmd == ("machine", "logs", "m1", "--boot", "-n", "50")
+
+    async def test_defaults_emit_id_only(self, rec: _RecordingCli) -> None:
+        backend = _backend({"container_machines": True})
+        await backend.machine_logs("m1")
+        (cmd, _), = rec.calls
+        assert cmd == ("machine", "logs", "m1")
+
+
+class TestRegistryLoginWire:
+    """CliBackend.registry_login -u / --password-stdin (SPEC phase 7 §2)."""
+
+    async def test_username_scheme_password_stdin(self, rec: _RecordingCli) -> None:
+        await _backend().registry_login(
+            "reg.example.com",
+            username="jay",
+            password_stdin="s3cr3t",
+            scheme="http",
+        )
+        (cmd, kwargs), = rec.calls
+        assert cmd == (
+            "registry", "login", "-u", "jay", "--scheme", "http",
+            "--password-stdin", "reg.example.com",
+        )
+        assert kwargs["input_text"] == "s3cr3t"
+
+    async def test_plain_login_has_no_stdin_input(self, rec: _RecordingCli) -> None:
+        await _backend().registry_login("reg.example.com")
+        (cmd, kwargs), = rec.calls
+        assert cmd == ("registry", "login", "reg.example.com")
+        assert "input_text" not in kwargs
+
+
+# ------------------------------------------------------------------
+# exec wire order (container >= 1.x: options precede the container id)
+# ------------------------------------------------------------------
+
+
+class TestExecWireOrder:
+    def test_options_precede_container_id(self) -> None:
+        """Option flags must come BEFORE <id> — post-id args are the command.
+
+        Regression for the 1.3.1 wire contract: `container exec -t <id> ...`
+        works, `<id> -t ...` is parsed as the executable.
+        """
+        captured: dict[str, object] = {}
+
+        async def fake_impl(*args: str, **kw: object) -> tuple[int, str, str]:
+            captured["args"] = args
+            captured["kw"] = kw
+            return 0, "ok", ""
+
+        import daedalus.core.cli_backend as cb
+
+        orig = cb._run_cli_impl
+        cb._run_cli_impl = fake_impl  # type: ignore[assignment]
+        try:
+            import asyncio
+
+            async def go() -> None:
+                backend = CliBackend(CapabilityManifest())
+                await backend.exec(
+                    "cid-123", ["uname", "-m"],
+                    tty=True, detached=True, user="root", workdir="/",
+                    env={"A": "1"}, ulimit=["nofile=1024"],
+                )
+
+            asyncio.run(go())
+        finally:
+            cb._run_cli_impl = orig  # type: ignore[assignment]
+
+        args = captured["args"]
+        assert isinstance(args, tuple)
+        idx = args.index("cid-123")
+        flags = [a for a in args[:idx] if str(a).startswith("-")]
+        # flags only (value args are filtered out by the startswith("-"))
+        assert flags == [
+            "--tty", "--interactive", "-d", "--user",
+            "--ulimit", "--workdir", "--env",
+        ]
+        assert list(args[idx + 1:]) == ["uname", "-m"]

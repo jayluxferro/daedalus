@@ -191,6 +191,36 @@ def create(
         list[str] | None,
         typer.Option("--cap-drop", help="Drop capability (repeatable)"),
     ] = None,
+    arch: Annotated[str | None, typer.Option("--arch", "-a")] = None,
+    os: Annotated[str | None, typer.Option("--os")] = None,
+    platform: Annotated[str | None, typer.Option("--platform")] = None,
+    rosetta: Annotated[bool, typer.Option("--rosetta")] = False,
+    ssh: Annotated[bool, typer.Option("--ssh")] = False,
+    init: Annotated[bool, typer.Option("--init", help="Custom PID-1 (init-image)")] = False,
+    init_image: Annotated[str | None, typer.Option("--init-image")] = None,
+    kernel_arg: Annotated[
+        list[str] | None,
+        typer.Option("--kernel-arg", help="k=v kernel arg (repeatable)"),
+    ] = None,
+    masked_path: Annotated[
+        list[str] | None,
+        typer.Option("--masked-path", help="Mask a path (repeatable)"),
+    ] = None,
+    read_only_path: Annotated[
+        list[str] | None,
+        typer.Option("--read-only-path", help="Mount a path read-only (repeatable)"),
+    ] = None,
+    shm_size: Annotated[str | None, typer.Option("--shm-size", help="Size e.g. 64M")] = None,
+    ulimit: Annotated[
+        list[str] | None,
+        typer.Option("--ulimit", help="Ulimit spec e.g. nofile=1024 (repeatable)"),
+    ] = None,
+    publish_socket: Annotated[
+        list[str] | None,
+        typer.Option("--publish-socket", help="Publish socket spec (repeatable)"),
+    ] = None,
+    virtualization: Annotated[bool, typer.Option("--virtualization")] = False,
+    runtime: Annotated[str | None, typer.Option("--runtime")] = None,
     json_output: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:
     """Create a container without starting it."""
@@ -215,6 +245,36 @@ def create(
         kwargs["cap_add"] = cap_add
     if cap_drop:
         kwargs["cap_drop"] = cap_drop
+    if arch:
+        kwargs["arch"] = arch
+    if os:
+        kwargs["os"] = os
+    if platform:
+        kwargs["platform"] = platform
+    if rosetta:
+        kwargs["rosetta"] = True
+    if ssh:
+        kwargs["ssh"] = True
+    if init:
+        kwargs["init"] = True
+    if init_image:
+        kwargs["init_image"] = init_image
+    if kernel_arg:
+        kwargs["kernel_arg"] = kernel_arg
+    if masked_path:
+        kwargs["masked_path"] = masked_path
+    if read_only_path:
+        kwargs["read_only_path"] = read_only_path
+    if shm_size:
+        kwargs["shm_size"] = shm_size
+    if ulimit:
+        kwargs["ulimit"] = ulimit
+    if publish_socket:
+        kwargs["publish_socket"] = publish_socket
+    if virtualization:
+        kwargs["virtualization"] = True
+    if runtime:
+        kwargs["runtime"] = runtime
     cmd_list = command.split() if command else None
 
     async def _go() -> None:
@@ -262,6 +322,36 @@ def run(
         list[str] | None,
         typer.Option("--cap-drop", help="Drop capability (repeatable)"),
     ] = None,
+    arch: Annotated[str | None, typer.Option("--arch", "-a")] = None,
+    os: Annotated[str | None, typer.Option("--os")] = None,
+    platform: Annotated[str | None, typer.Option("--platform")] = None,
+    rosetta: Annotated[bool, typer.Option("--rosetta")] = False,
+    ssh: Annotated[bool, typer.Option("--ssh")] = False,
+    init: Annotated[bool, typer.Option("--init", help="Custom PID-1 (init-image)")] = False,
+    init_image: Annotated[str | None, typer.Option("--init-image")] = None,
+    kernel_arg: Annotated[
+        list[str] | None,
+        typer.Option("--kernel-arg", help="k=v kernel arg (repeatable)"),
+    ] = None,
+    masked_path: Annotated[
+        list[str] | None,
+        typer.Option("--masked-path", help="Mask a path (repeatable)"),
+    ] = None,
+    read_only_path: Annotated[
+        list[str] | None,
+        typer.Option("--read-only-path", help="Mount a path read-only (repeatable)"),
+    ] = None,
+    shm_size: Annotated[str | None, typer.Option("--shm-size", help="Size e.g. 64M")] = None,
+    ulimit: Annotated[
+        list[str] | None,
+        typer.Option("--ulimit", help="Ulimit spec e.g. nofile=1024 (repeatable)"),
+    ] = None,
+    publish_socket: Annotated[
+        list[str] | None,
+        typer.Option("--publish-socket", help="Publish socket spec (repeatable)"),
+    ] = None,
+    virtualization: Annotated[bool, typer.Option("--virtualization")] = False,
+    runtime: Annotated[str | None, typer.Option("--runtime")] = None,
     proxy: Annotated[
         str | None,
         typer.Option("--proxy", help="Proxy host:port for Burp/mitmproxy"),
@@ -304,6 +394,36 @@ def run(
         kwargs["cap_add"] = cap_add
     if cap_drop:
         kwargs["cap_drop"] = cap_drop
+    if arch:
+        kwargs["arch"] = arch
+    if os:
+        kwargs["os"] = os
+    if platform:
+        kwargs["platform"] = platform
+    if rosetta:
+        kwargs["rosetta"] = True
+    if ssh:
+        kwargs["ssh"] = True
+    if init:
+        kwargs["init"] = True
+    if init_image:
+        kwargs["init_image"] = init_image
+    if kernel_arg:
+        kwargs["kernel_arg"] = kernel_arg
+    if masked_path:
+        kwargs["masked_path"] = masked_path
+    if read_only_path:
+        kwargs["read_only_path"] = read_only_path
+    if shm_size:
+        kwargs["shm_size"] = shm_size
+    if ulimit:
+        kwargs["ulimit"] = ulimit
+    if publish_socket:
+        kwargs["publish_socket"] = publish_socket
+    if virtualization:
+        kwargs["virtualization"] = True
+    if runtime:
+        kwargs["runtime"] = runtime
     cmd_list = command.split() if command else None
 
     async def _go() -> None:
@@ -438,13 +558,22 @@ def start(
 
 @app.command()
 def stop(
-    container_id: str,
+    container_id: Annotated[str | None, typer.Argument()] = None,
     timeout: Annotated[int, typer.Option("-t", "--timeout")] = 10,
     signal: Annotated[str | None, typer.Option("--signal", "-s")] = None,
+    all: Annotated[bool, typer.Option("--all", "-a")] = False,
 ) -> None:
-    """Stop a running container."""
+    """Stop a running container (--all stops every container)."""
     _bootstrap()
     async def _go() -> None:
+        if all:
+            # Forge.stop has no `all` param (single-container only) — call the
+            # backend accessor directly for `stop -a` (SPEC phase 7 §4).
+            await _b().stop(container_id="", all=True)
+            console.print("[yellow]■[/] Stopped all containers")
+            return
+        if not container_id:
+            raise typer.BadParameter("container id required unless --all")
         lab = await _f().stop(container_id, timeout=timeout, signal=signal)
         console.print(f"[yellow]■[/] Stopped [bold]{lab.id[:12]}[/] — {lab.state}")
     asyncio.run(_go())
@@ -452,12 +581,25 @@ def stop(
 
 @app.command()
 def destroy(
-    container_id: str,
+    container_id: Annotated[str | None, typer.Argument()] = None,
     confirm: Annotated[bool, typer.Option("--confirm")] = False,
+    all: Annotated[bool, typer.Option("--all", "-a")] = False,
 ) -> None:
-    """Destroy a container (stop + delete). Requires --confirm."""
+    """Destroy a container (stop + delete). Requires --confirm; --all destroys every container."""
     _bootstrap()
     async def _go() -> None:
+        if all:
+            # Forge.destroy is single-container; `delete -a` runs through the
+            # backend accessor directly, still behind the confirm gate
+            # (SPEC phase 7 §4).
+            if not confirm:
+                console.print("[yellow]requires --confirm[/]")
+                raise typer.Exit(code=1)
+            await _b().delete(container_id="", all=True)
+            console.print("[red]✗[/] Destroyed all containers")
+            return
+        if not container_id:
+            raise typer.BadParameter("container id required unless --all")
         await _f().destroy(container_id, confirm=confirm)
         console.print(f"[red]✗[/] Destroyed [bold]{container_id[:12]}[/]")
     asyncio.run(_go())
@@ -492,6 +634,11 @@ def exec_(
     env_file: Annotated[str | None, typer.Option("--env-file")] = None,
     tty: Annotated[bool, typer.Option("--tty", "-t")] = False,
     interactive: Annotated[bool, typer.Option("--interactive", "-i")] = False,
+    detached: Annotated[bool, typer.Option("--detach", "-d")] = False,
+    ulimit: Annotated[
+        list[str] | None,
+        typer.Option("--ulimit", help="Ulimit spec e.g. nofile=1024 (repeatable)"),
+    ] = None,
 ) -> None:
     """Execute a command inside a running container."""
     _bootstrap()
@@ -499,6 +646,7 @@ def exec_(
         opts = ExecOptions(
             user=user, uid=uid, gid=gid, workdir=workdir,
             env_file=env_file, tty=tty, interactive=interactive,
+            detached=detached, ulimit=ulimit,
         )
         result = await _i().exec(container_id, list(command), options=opts)
         if result.stdout:
@@ -916,11 +1064,27 @@ def machine_delete(
 def machine_run(
     machine_id: str,
     command: Annotated[list[str], typer.Argument(help="Command to run inside the machine")],
+    root: Annotated[bool, typer.Option("--root")] = False,
+    detach: Annotated[bool, typer.Option("--detach", "-d")] = False,
+    tty: Annotated[bool, typer.Option("--tty", "-t")] = False,
+    user: Annotated[str | None, typer.Option("--user", "-u")] = None,
+    workdir: Annotated[str | None, typer.Option("--workdir", "-w")] = None,
+    ulimit: Annotated[
+        list[str] | None,
+        typer.Option("--ulimit", help="Ulimit spec e.g. nofile=1024 (repeatable)"),
+    ] = None,
 ) -> None:
     """Boot a machine if necessary and run a command inside it."""
     _bootstrap()
     async def _go() -> None:
-        result = await _mc().run(machine_id, list(command), timeout=60.0)
+        # Machina.run does not yet pass root/ulimit/detached/tty/user/workdir
+        # through (engine passthrough pending) — call the backend accessor
+        # directly (SPEC phase 7 §4).
+        result = await _b().machine_run(
+            machine_id, list(command), timeout=60.0,
+            root=root, ulimit=ulimit, detached=detach,
+            tty=tty, user=user, workdir=workdir,
+        )
         if result.stdout:
             console.print(result.stdout)
         if result.stderr:
@@ -934,11 +1098,21 @@ def machine_run(
 
 
 @machine_app.command("logs")
-def machine_logs(machine_id: str) -> None:
+def machine_logs(
+    machine_id: str,
+    boot: Annotated[bool, typer.Option("--boot")] = False,
+    follow: Annotated[bool, typer.Option("--follow", "-f")] = False,
+    tail: Annotated[int | None, typer.Option("--tail", "-n")] = None,
+) -> None:
     """Dump a machine's boot/stdout logs."""
     _bootstrap()
     async def _go() -> None:
-        console.print(await _mc().logs(machine_id))
+        # Machina.logs does not yet accept boot/follow/tail (engine passthrough
+        # pending) — call the backend accessor directly (SPEC phase 7 §4).
+        output = await _b().machine_logs(
+            machine_id, boot=boot, follow=follow, tail=tail,
+        )
+        console.print(output)
     asyncio.run(_go())
 
 

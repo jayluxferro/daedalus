@@ -4,7 +4,7 @@ import {
   useSetMachineDefault, useStopMachine, useDeleteMachine, useRunMachine,
   useMachineLogs,
 } from '../api/machines'
-import type { MachineInfo, MachineCreateBody, MachineSetBody, MachineRunResult } from '../api/machines'
+import type { MachineInfo, MachineCreateBody, MachineSetBody, MachineRunResult, MachineRunBody } from '../api/machines'
 import { Box, GlassBox, Badge, Modal } from './shared'
 
 const input: React.CSSProperties = { width: '100%', padding: '6px 10px', borderRadius: 6, border: '1px solid var(--border)', background: '#0f0f13', color: 'var(--fg)', fontSize: 13, boxSizing: 'border-box' }
@@ -16,6 +16,43 @@ const primaryBtn: React.CSSProperties = { padding: '8px 16px', background: '#3b8
 const th: React.CSSProperties = { padding: '8px 12px', fontSize: 11, textTransform: 'uppercase' }
 const td: React.CSSProperties = { padding: '8px 12px' }
 const preStyle: React.CSSProperties = { fontSize: 11, background: '#0f0f13', padding: 8, borderRadius: 6, whiteSpace: 'pre-wrap', wordBreak: 'break-all', margin: 0, maxHeight: 200, overflow: 'auto' }
+
+interface RunOptionField {
+  key: string
+  label: string
+  kind: 'text' | 'bool' | 'repeat'
+  placeholder?: string
+}
+
+// Machine-run option registry (SPEC phase 7 §7: root, detach, tty, user,
+// workdir, ulimit).  Data-driven: renders the run-box controls and folds
+// values into the run request body.
+const RUN_OPTION_FIELDS: RunOptionField[] = [
+  { key: 'root', label: 'Root', kind: 'bool' },
+  { key: 'tty', label: 'TTY', kind: 'bool' },
+  { key: 'detached', label: 'Detach', kind: 'bool' },
+  { key: 'user', label: 'User', kind: 'text', placeholder: 'e.g. root' },
+  { key: 'workdir', label: 'Workdir', kind: 'text', placeholder: 'e.g. /app' },
+  { key: 'ulimit', label: 'Ulimits', kind: 'repeat', placeholder: 'nofile=1024 (comma/newline separated)' },
+]
+
+/** Fold registry values into a machine-run body; empty values are omitted. */
+function foldRunFields(vals: Record<string, string | boolean>): Record<string, unknown> {
+  const out: Record<string, unknown> = {}
+  for (const f of RUN_OPTION_FIELDS) {
+    const v = vals[f.key]
+    if (f.kind === 'bool') {
+      if (v === true) out[f.key] = true
+    } else if (f.kind === 'repeat') {
+      const list = String(v ?? '').split(/[,\n]/).map(s => s.trim()).filter(Boolean)
+      if (list.length) out[f.key] = list
+    } else {
+      const s = String(v ?? '').trim()
+      if (s) out[f.key] = s
+    }
+  }
+  return out
+}
 
 function formatBytes(b: number): string {
   if (b > 1e12) return (b / 1e12).toFixed(1) + ' TB'
@@ -86,6 +123,7 @@ function MachineRow({ machine: m, onInspect }: { machine: MachineInfo; onInspect
   const [setOpen, setSetOpen] = useState(false)
   const [runOpen, setRunOpen] = useState(false)
   const [cmd, setCmd] = useState('')
+  const [runOpts, setRunOpts] = useState<Record<string, string | boolean>>({})
   const [runResult, setRunResult] = useState<MachineRunResult | null>(null)
   const [runError, setRunError] = useState<string | null>(null)
   const [logsOpen, setLogsOpen] = useState(false)
@@ -97,7 +135,8 @@ function MachineRow({ machine: m, onInspect }: { machine: MachineInfo; onInspect
     if (!parts.length) return
     setRunResult(null)
     setRunError(null)
-    run.mutate({ id: m.id, command: parts }, {
+    const body: MachineRunBody = { command: parts, ...foldRunFields(runOpts) }
+    run.mutate({ id: m.id, body }, {
       onSuccess: r => setRunResult(r),
       onError: err => setRunError((err as Error).message),
     })
@@ -143,6 +182,22 @@ function MachineRow({ machine: m, onInspect }: { machine: MachineInfo; onInspect
             <div style={{ display: 'flex', gap: 6 }}>
               <input value={cmd} onChange={e => setCmd(e.target.value)} placeholder="e.g. uname -a" style={{ ...input, flex: 1 }} />
               <button type="submit" disabled={run.isPending} style={{ ...btnStyle, color: '#22c55e' }}>{run.isPending ? 'Running...' : 'Run'}</button>
+            </div>
+            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+              {RUN_OPTION_FIELDS.filter(f => f.kind === 'bool').map(f => (
+                <label key={f.key} style={{ fontSize: 11, color: 'var(--muted-fg)', display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                  <input type="checkbox" checked={runOpts[f.key] === true} onChange={e => setRunOpts(v => ({ ...v, [f.key]: e.target.checked }))} />
+                  {f.label}
+                </label>
+              ))}
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 6 }}>
+              {RUN_OPTION_FIELDS.filter(f => f.kind !== 'bool').map(f => (
+                <label key={f.key} style={{ ...label, fontSize: 11 }}>
+                  {f.label}
+                  <input value={String(runOpts[f.key] ?? '')} onChange={e => setRunOpts(v => ({ ...v, [f.key]: e.target.value }))} placeholder={f.placeholder} style={{ ...input, padding: '4px 8px', fontSize: 12 }} />
+                </label>
+              ))}
             </div>
             {runError && <div style={{ fontSize: 11, color: '#ef4444' }}>{runError}</div>}
             {runResult && (
@@ -221,9 +276,21 @@ function SetForm({ machine: m, onDone }: { machine: MachineInfo; onDone: () => v
 }
 
 function LogsPane({ id }: { id: string }) {
-  const { data, isLoading, error } = useMachineLogs(id)
+  const [boot, setBoot] = useState(false)
+  const [tail, setTail] = useState('')
+  const { data, isLoading, error } = useMachineLogs(id, {
+    boot,
+    tail: tail.trim() ? (parseInt(tail) || undefined) : undefined,
+  })
   return (
     <div style={{ marginTop: 8 }}>
+      <div style={{ display: 'flex', gap: 12, alignItems: 'center', marginBottom: 6 }}>
+        <label style={{ fontSize: 11, color: 'var(--muted-fg)', display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+          <input type="checkbox" checked={boot} onChange={e => setBoot(e.target.checked)} />
+          Boot log
+        </label>
+        <input value={tail} onChange={e => setTail(e.target.value)} placeholder="tail lines" style={{ ...input, width: 90, padding: '4px 8px', fontSize: 12 }} />
+      </div>
       {isLoading && <div style={{ fontSize: 11, color: 'var(--muted-fg)' }}>Loading logs...</div>}
       {error && <div style={{ fontSize: 11, color: '#ef4444' }}>{(error as Error).message}</div>}
       {data && <pre style={{ ...preStyle, maxHeight: 300 }}>{data.logs || '(no logs)'}</pre>}

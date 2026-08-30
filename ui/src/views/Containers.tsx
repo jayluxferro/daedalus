@@ -1,5 +1,6 @@
 import { useState, useMemo } from 'react'
 import { useContainers, useRunContainer, useStartContainer, useStopContainer, useDestroyContainer, useKillContainer, useInspectContainer, useStats, useExportFs, usePruneContainers, useCpuPercentMap, useStatsHistory } from '../api/containers'
+import type { RunContainerBody } from '../api/containers'
 import { useProfiles } from '../api/system'
 import { Box, GlassBox, Badge, StatCard, Modal } from './shared'
 import Sparkline from './Sparkline'
@@ -9,6 +10,53 @@ const selectStyle: React.CSSProperties = { ...input, appearance: 'none', WebkitA
 const label: React.CSSProperties = { fontSize: 12, color: 'var(--muted-fg)', display: 'flex', flexDirection: 'column', gap: 4 }
 const btnStyle: React.CSSProperties = { padding: '6px 14px', borderRadius: 6, border: '1px solid var(--border)', background: '#1c1c22', color: 'var(--fg)', cursor: 'pointer', fontSize: 12 }
 const dangerBtn: React.CSSProperties = { ...btnStyle, borderColor: '#ef444440', color: '#ef4444' }
+
+interface AdvancedField {
+  key: string
+  label: string
+  kind: 'text' | 'bool' | 'repeat' | 'select'
+  options?: string[]
+  placeholder?: string
+}
+
+// Container 1.3.1 run-surface registry (SPEC phase 7 §7) — ONE source of
+// truth: renders the create-modal advanced controls AND folds the values
+// into the request body.  ``repeat`` inputs are comma/newline-separated.
+const ADVANCED_FIELDS: AdvancedField[] = [
+  { key: 'arch', label: 'Arch', kind: 'select', options: ['arm64', 'x86_64'], placeholder: '(default)' },
+  { key: 'os', label: 'OS', kind: 'text', placeholder: 'e.g. linux' },
+  { key: 'platform', label: 'Platform', kind: 'text', placeholder: 'os/arch/variant — overrides arch/os' },
+  { key: 'rosetta', label: 'Rosetta (run x86_64 images)', kind: 'bool' },
+  { key: 'ssh', label: 'SSH agent forwarding', kind: 'bool' },
+  { key: 'init', label: 'Init (custom PID-1)', kind: 'bool' },
+  { key: 'init_image', label: 'Init image', kind: 'text', placeholder: 'e.g. docker.io/library/init:latest' },
+  { key: 'kernel_arg', label: 'Kernel args', kind: 'repeat', placeholder: 'k=v, k2=v2' },
+  { key: 'masked_path', label: 'Masked paths', kind: 'repeat', placeholder: '/a, /b' },
+  { key: 'read_only_path', label: 'Read-only paths', kind: 'repeat', placeholder: '/a, /b' },
+  { key: 'shm_size', label: 'SHM size', kind: 'text', placeholder: 'e.g. 64M' },
+  { key: 'ulimit', label: 'Ulimits', kind: 'repeat', placeholder: 'nofile=1024, nproc=64' },
+  { key: 'publish_socket', label: 'Publish sockets', kind: 'repeat', placeholder: 'host:guest' },
+  { key: 'virtualization', label: 'Virtualization', kind: 'bool' },
+  { key: 'runtime', label: 'Runtime', kind: 'text', placeholder: 'e.g. com.docker.vmnetd' },
+]
+
+/** Fold registry values into a create-body dict; empty values are omitted. */
+function foldAdvancedFields(vals: Record<string, string | boolean>): Record<string, unknown> {
+  const out: Record<string, unknown> = {}
+  for (const f of ADVANCED_FIELDS) {
+    const v = vals[f.key]
+    if (f.kind === 'bool') {
+      if (v === true) out[f.key] = true
+    } else if (f.kind === 'repeat') {
+      const list = String(v ?? '').split(/[,\n]/).map(s => s.trim()).filter(Boolean)
+      if (list.length) out[f.key] = list
+    } else {
+      const s = String(v ?? '').trim()
+      if (s) out[f.key] = s
+    }
+  }
+  return out
+}
 
 function formatBytes(b: number): string {
   if (b > 1e12) return (b / 1e12).toFixed(1) + ' TB'
@@ -238,6 +286,8 @@ function CreateForm({ onDone }: { onDone: () => void }) {
   const [volumes, setVolumes] = useState('')
   const [workdir, setWorkdir] = useState('')
   const [env, setEnv] = useState('')
+  // Registry-backed 1.3.1 run-surface values (text/repeat/select → string, bool → boolean)
+  const [advVals, setAdvVals] = useState<Record<string, string | boolean>>({})
   const run = useRunContainer()
   const { data: profileList } = useProfiles()
 
@@ -246,13 +296,15 @@ function CreateForm({ onDone }: { onDone: () => void }) {
   return (
     <form onSubmit={e => {
       e.preventDefault()
-      const body: Record<string, unknown> = {
+      const body: RunContainerBody = {
         image,
         name: name || undefined,
         profile,
         start,
         detach: start ? detach : false,
         remove,
+        // 1.3.1 run surface — registry-folded, empty values omitted
+        ...foldAdvancedFields(advVals),
       }
       if (command.trim()) {
         body.command = command.split(/\s+/).filter(Boolean)
@@ -276,7 +328,7 @@ function CreateForm({ onDone }: { onDone: () => void }) {
           if (Object.keys(envObj).length) body.env = envObj
         }
       }
-      run.mutate(body as Parameters<ReturnType<typeof useRunContainer>['mutate']>[0], { onSuccess: onDone })
+      run.mutate(body, { onSuccess: onDone })
     }} style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
       <label style={label}>Image <input value={image} onChange={e => setImage(e.target.value)} style={input} /></label>
       <div style={{ display: 'flex', gap: 12 }}>
@@ -322,6 +374,29 @@ function CreateForm({ onDone }: { onDone: () => void }) {
             <label style={{ ...label, gridColumn: '1 / -1' }}>Volumes <input value={volumes} onChange={e => setVolumes(e.target.value)} placeholder="/host/path:/container/path (comma-separated)" style={input} /></label>
             <label style={label}>Workdir <input value={workdir} onChange={e => setWorkdir(e.target.value)} placeholder="/app" style={input} /></label>
             <label style={{ ...label, gridColumn: '1 / -1' }}>Env <input value={env} onChange={e => setEnv(e.target.value)} placeholder="FOO=bar,BAR=baz" style={input} /></label>
+          </div>
+          <div style={{ borderTop: '1px solid var(--border)', marginTop: 10, paddingTop: 10 }}>
+            <div style={{ fontSize: 11, color: 'var(--muted-fg)', marginBottom: 8 }}>Container 1.3.1 run surface</div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+              {ADVANCED_FIELDS.map(f => f.kind === 'bool' ? (
+                <label key={f.key} style={{ ...label, gridColumn: '1 / -1', flexDirection: 'row', alignItems: 'center', gap: 6, width: 'fit-content' }}>
+                  <input type="checkbox" checked={advVals[f.key] === true} onChange={e => setAdvVals(v => ({ ...v, [f.key]: e.target.checked }))} />
+                  {f.label}
+                </label>
+              ) : (
+                <label key={f.key} style={label}>
+                  {f.label}
+                  {f.kind === 'select' ? (
+                    <select value={String(advVals[f.key] ?? '')} onChange={e => setAdvVals(v => ({ ...v, [f.key]: e.target.value }))} style={selectStyle}>
+                      <option value="">(default)</option>
+                      {(f.options ?? []).map(o => <option key={o} value={o}>{o}</option>)}
+                    </select>
+                  ) : (
+                    <input value={String(advVals[f.key] ?? '')} onChange={e => setAdvVals(v => ({ ...v, [f.key]: e.target.value }))} placeholder={f.placeholder} style={input} />
+                  )}
+                </label>
+              ))}
+            </div>
           </div>
         </GlassBox>
       )}

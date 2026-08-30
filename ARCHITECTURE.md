@@ -426,8 +426,8 @@ anything still gated lives in the "container reality" note below.
 | forge | create, run, start, stop, kill, delete, list, inspect, logs | CLI, API, MCP |
 | forge | stats — one-shot CPU/mem/net/block/proc samples (`stats --no-stream --format json`), sampled in `StatsSample.sampled_at` for later rate derivation | CLI, API, MCP |
 | sampling | stats observation engine (SPEC phase 5) — `StatsSampler` 2 s cadence, two-tick CPU%/delta rate derivation, per-container history ring (300 pts ≈ 10 min), `~/.daedalus/store/stats-history.json` persistence (save every 10 ticks, load on boot), SSE `/stats/stream` + `/stats/history` API; process-wide `get_sampler` singleton shared with `Forge.detonate` (its raw evidence loop runs alongside so detonation stats land in the global ring) | API, UI |
-| forge (RunSpec) | `--network <name>`, `-p/--publish` (repeatable), `--cap-add`, `--cap-drop`, `--read-only`, `--init-image`, `--ssh` serialised by `RunSpec.to_cli_args()` | CLI, API, MCP |
-| icarus | exec (no `--` separator), logs (boot + stdio) | CLI, API, MCP |
+| forge (RunSpec) | **all 51 run/create flags** serialised by `RunSpec.to_cli_args()` (SPEC phase 7 §3) — the 1.2.2 core (`--network`, `-p/--publish`, `--cap-add`, `--cap-drop`, `--read-only`, `--init-image`, `--ssh`, …) plus `--init`, `--kernel-arg`, `--masked-path`, `--read-only-path`, `--rosetta`, `--runtime`, `--shm-size`, `--ulimit`, `--publish-socket`, `--virtualization`, `--platform`/`--os`/`--arch`; emission section order documented on the method | CLI, API, MCP |
+| icarus | exec — **option flags always precede the container id** (wire contract, verified live: container ≥ 1.x treats everything after `<id>` as the executable + its arguments, so `--workdir`/`--detach`/`--ulimit`/`--user`/`--env` are emitted before the id, never after); logs (boot + stdio) | CLI, API, MCP |
 | icarus | copy — `copy_from`/`copy_to` (bidirectional, `id:` prefix built in code), byte-identical round-trip | CLI, API, MCP |
 | icarus | export — full-FS tar via `export_fs` (works on **running** containers), indexed as a store artifact (`kind="fs"`) | CLI, API, MCP |
 | mint | pull, push, save, load, tag, delete, inspect, list, prune, build | CLI, API, MCP |
@@ -441,6 +441,16 @@ anything still gated lives in the "container reality" note below.
 | audit | append-only, checksummed JSONL audit log | Engine |
 | store | run manifests with artifact index (fs tars, reports) | Engine |
 | capabilities | host probe (binary, version tuple, feature gates incl. stats/copy/export/prune/network, flag inventory, `security_safe` GHSA-floor gate) | CLI, MCP |
+
+**Multi-arch (verified live, 1.3.1):** `daedalus run --arch x86_64` (optionally
+`--rosetta`) runs amd64 guests on Apple silicon — `uname -m` inside the guest reports
+`x86_64`, and inspect shows `platform.architecture: amd64` with `rosetta: true` when
+translation is in use.  `--platform <os/arch/variant>` takes precedence over `--os` /
+`--arch` when both are given (SPEC phase 7 §3 emission order).  Bulk verbs are exposed on
+every surface: `daedalus stop --all` / `daedalus destroy --all --confirm`, API
+`POST /containers/stop` + `POST /containers/delete` (`{"all":true}` bodies), MCP
+`daedalus_stop`/`daedalus_destroy` with `all=true` — verified live against 1.3.1
+(`tests/integration/test_surface_run.py`).
 
 ### container reality (what still isn't wrapped)
 
@@ -456,22 +466,25 @@ from the boot logs); machine **backing containers are hidden by the CLI** (the d
 containers from `stats` too, so the sampling engine cannot re-key per-machine CPU/memory
 history — a SPEC phase 5 non-goal, documented rather than worked around.  The CLI also
 ships a `k8s` plugin — it exists but is **not yet wrapped** by daedalus.
-Run/create flags beyond the RunSpec extension (`--rosetta`, `--virtualization`,
-`--publish-socket`, `--shm-size`, `--ulimit`) are present but not yet serialised (the machine
-`--virtualization` flag *is* serialised on `MachineCreateSpec`); per-container kernels
-(`-k` + `system kernel set`) work.  `--init-image` and `--ssh` are **live** (1.3.1) —
-serialised as `RunSpec.init_image` / `RunSpec.ssh`, so ariadne's eBPF init-image telemetry is
-unblocked.  Registry scheme is `--scheme http|https` only — **`auto` was removed in container
-1.3.0** (the default is https); daedalus never emits `auto`.
+Run/create flags are fully serialised — the complete 51-flag surface (incl. `--rosetta`,
+`--virtualization`, `--publish-socket`, `--shm-size`, `--ulimit`, `--init`, `--kernel-arg`,
+`--masked-path`, `--read-only-path`) is wrapped by `RunSpec.to_cli_args()` (SPEC phase 7
+§3), and the flags the runtime reports are reflected in the container config JSON
+(`rosetta`, `shmSize`, `useInit`, `initProcess.rlimits`); the machine `--virtualization`
+flag is serialised on `MachineCreateSpec`; per-container kernels (`-k` + `system kernel
+set`) work.  `--init-image` and `--ssh` are **live** (1.3.1) — serialised as
+`RunSpec.init_image` / `RunSpec.ssh`, so ariadne's eBPF init-image telemetry is unblocked.
+Registry scheme is `--scheme http|https` only — **`auto` was removed in container 1.3.0**
+(the default is https); daedalus never emits `auto`.
 
 ### Quality gates (all passing)
 
 ```
 mypy --strict daedalus/     → Success: no issues found in 26 source files
-pytest tests/               → 311 passed, 1 skipped (286 unit + 25 integration; the slow systemd machine-boot test skips on the container exec limitation, upstream apple/container#1669)
+pytest tests/               → 341 passed, 1 skipped (312 unit + 29 integration; the slow systemd machine-boot test skips on the container exec limitation, upstream apple/container#1669)
 Detonation §M7 test         → 2 live detonations: dropper vs no-op reports distinguishable, no VM/network leaks (tests/integration/test_detonation.py)
 Import-time I/O             → zero subprocess calls
-MCP (stdio)                 → 61 tools, handshake verified
+MCP (stdio)                 → 67 tools, handshake verified
 MCP (cartograph federation) → discover + call verified
 API (FastAPI)               → /health, /stats, /stats/history, /stats/stream, /networks, /containers, /images, /profiles, /system/status, /detonate, /experiments
 ```

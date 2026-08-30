@@ -99,9 +99,9 @@ class TestCapabilityProbe:
         rf = m.runtime_features
         assert "port_forwarding" in rf
         assert "vmnet_host_access" in rf
-        # --publish exists on 1.2.2 but lands in extra_flags (not in
-        # EXPECTED_FLAGS), so known_flags-derived port_forwarding stays False.
-        assert rf["port_forwarding"] is False
+        # Phase 7: --publish moved into EXPECTED_FLAGS (the 1.3.1 exhaustive
+        # audit), so known_flags-derived port_forwarding is now True.
+        assert rf["port_forwarding"] is True
         assert rf["bind_mounts_at_create"] is True
 
     def test_probe_new_verb_gates(self):

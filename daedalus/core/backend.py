@@ -38,12 +38,13 @@ class ContainerState(str, Enum):
 class RunSpec:
     """The full set of flags for ``container create`` / ``container run``.
 
-    This matches the flags confirmed present in container 1.2.2 via
-    ``container run --help`` / ``container create --help``, plus
-    ``--init-image`` and ``--ssh`` (live in container 1.3.1).  Flags not
-    yet covered by this dataclass (rosetta, shm-size, ulimit,
-    publish-socket, virtualization) are intentionally absent — they will
-    be added when the CLI supports them.
+    Covers the complete 51-flag run surface captured live on container
+    1.3.1 (SPEC phase 7 §2): the 1.2.2 core plus ``--init``,
+    ``--init-image``, ``--kernel-arg``, ``--masked-path``,
+    ``--read-only-path``, ``--rosetta``, ``--runtime``, ``--shm-size``,
+    ``--ulimit``, ``--publish-socket``, ``--virtualization`` and
+    ``--platform``.  ``to_cli_args()`` is the single source of truth for
+    flag emission; its section order is documented there.
     """
 
     image: str
@@ -67,12 +68,16 @@ class RunSpec:
     # Resources
     cpus: int | None = None         # -c / --cpus
     memory: str | None = None       # -m / --memory
+    shm_size: str | None = None     # --shm-size <size>
+    ulimit: list[str] = field(default_factory=list)   # --ulimit <spec>, repeatable
 
     # Filesystem
     mounts: list[str] = field(default_factory=list)   # --mount  type=<>,source=<>,target=<>,readonly
     tmpfs: list[str] = field(default_factory=list)    # --tmpfs
     volumes: list[str] = field(default_factory=list)  # -v / --volume
     read_only: bool = False         # --read-only (rootfs read-only)
+    masked_path: list[str] = field(default_factory=list)     # --masked-path <path>, repeatable
+    read_only_path: list[str] = field(default_factory=list)  # --read-only-path <path>, repeatable
 
     # Kernel
     kernel: str | None = None       # -k / --kernel
@@ -82,6 +87,7 @@ class RunSpec:
     cidfile: str | None = None      # --cidfile
 
     # Platform
+    platform: str | None = None     # --platform <os/arch/variant>  (takes precedence over os/arch)
     os: str | None = None           # --os
     arch: str | None = None         # -a / --arch
 
@@ -99,11 +105,17 @@ class RunSpec:
     # Network / capabilities (container 1.2.2)
     network: str | None = None        # --network <name>  (attach to a network)
     publish: list[str] = field(default_factory=list)   # -p <spec>, repeatable
+    publish_socket: list[str] = field(default_factory=list)  # --publish-socket <spec>, repeatable
     cap_add: list[str] = field(default_factory=list)   # --cap-add <cap>, repeatable
     cap_drop: list[str] = field(default_factory=list)  # --cap-drop <cap>, repeatable
 
-    # Init image / SSH agent (container 1.3.1)
+    # Runtime / instrumentation (container 1.3.1)
+    runtime: str | None = None        # --runtime <name>
+    init: bool = False                # --init (custom PID-1 via init-image)
     init_image: str | None = None     # --init-image <image> (custom PID-1 / eBPF boot)
+    kernel_arg: list[str] = field(default_factory=list)  # --kernel-arg <k=v>, repeatable
+    rosetta: bool = False             # --rosetta (run x86_64 images via Rosetta)
+    virtualization: bool = False      # --virtualization
     ssh: bool = False                 # --ssh (forward SSH agent socket into container)
 
     # Analysis / instrumentation
@@ -168,6 +180,10 @@ class RunSpec:
             flags += ["--cpus", str(self.cpus)]
         if self.memory:
             flags += ["--memory", self.memory]
+        if self.shm_size:
+            flags += ["--shm-size", self.shm_size]
+        for u in self.ulimit:
+            flags += ["--ulimit", u]
 
         # --- filesystem ---
         for m in self.mounts:
@@ -176,8 +192,12 @@ class RunSpec:
             flags += ["--tmpfs", t]
         for v in self.volumes:
             flags += ["--volume", v]
+        for p in self.masked_path:
+            flags += ["--masked-path", p]
         if self.read_only:
             flags.append("--read-only")
+        for p in self.read_only_path:
+            flags += ["--read-only-path", p]
 
         # --- kernel ---
         if self.kernel:
@@ -190,6 +210,8 @@ class RunSpec:
             flags += ["--cidfile", self.cidfile]
 
         # --- platform ---
+        if self.platform:
+            flags += ["--platform", self.platform]
         if self.os:
             flags += ["--os", self.os]
         if self.arch:
@@ -230,19 +252,33 @@ class RunSpec:
         # after the container is running: the cert file content is piped
         # via exec into /usr/local/share/ca-certificates/.
 
+        # --- runtime / instrumentation (container 1.3.1) ---
+        if self.runtime:
+            flags += ["--runtime", self.runtime]
+        if self.init:
+            flags.append("--init")
+        if self.init_image:
+            flags += ["--init-image", self.init_image]
+        for k in self.kernel_arg:
+            flags += ["--kernel-arg", k]
+        if self.rosetta:
+            flags.append("--rosetta")
+        if self.virtualization:
+            flags.append("--virtualization")
+
         # --- network / capabilities (container 1.2.2) ---
         if self.network:
             flags += ["--network", self.network]
         for p in self.publish:
             flags += ["-p", p]
+        for s in self.publish_socket:
+            flags += ["--publish-socket", s]
         for cap in self.cap_add:
             flags += ["--cap-add", cap]
         for cap in self.cap_drop:
             flags += ["--cap-drop", cap]
 
-        # --- init image / ssh agent (container 1.3.1) ---
-        if self.init_image:
-            flags += ["--init-image", self.init_image]
+        # --- ssh agent (emitted after the network section) ---
         if self.ssh:
             flags.append("--ssh")
 
@@ -323,6 +359,9 @@ class BuildSpec:
     os: str | None = None            # --os
     build_arg: dict[str, str] = field(default_factory=dict)  # --build-arg
     label: dict[str, str] = field(default_factory=dict)      # -l / --label
+    secret: list[str] = field(default_factory=list)   # --secret <id=src>, repeatable
+    ssh: bool = False                 # --ssh (forward SSH agent into the build)
+    pull: bool = False                # --pull (always pull base images)
     no_cache: bool = False           # --no-cache
     output: str | None = None        # -o / --output (default: type=oci)
     progress: str | None = None      # --progress auto|plain|tty
@@ -347,6 +386,12 @@ class BuildSpec:
             args += ["--build-arg", f"{k}={v}"]
         for k, v in self.label.items():
             args += ["--label", f"{k}={v}"]
+        for s in self.secret:
+            args += ["--secret", s]
+        if self.ssh:
+            args.append("--ssh")
+        if self.pull:
+            args.append("--pull")
         if self.no_cache:
             args.append("--no-cache")
         if self.output:
@@ -672,11 +717,12 @@ class Backend(ABC):
     async def stop(
         self,
         container_id: str,
-        timeout: int = 10,
         *,
+        timeout: int = 10,
         signal: str | None = None,
+        all: bool = False,
     ) -> None:
-        """Stop a running container with ``SIGTERM`` + timeout."""
+        """Stop a running container with ``SIGTERM`` + timeout (``all`` → ``stop -a``)."""
         ...
 
     @abstractmethod
@@ -685,8 +731,10 @@ class Backend(ABC):
         ...
 
     @abstractmethod
-    async def delete(self, container_id: str, force: bool = False) -> None:
-        """Delete one or more containers."""
+    async def delete(
+        self, container_id: str, *, force: bool = False, all: bool = False,
+    ) -> None:
+        """Delete one or more containers (``all`` → ``delete -a``)."""
         ...
 
     @abstractmethod
@@ -726,6 +774,8 @@ class Backend(ABC):
         gid: int | None = None,
         tty: bool = False,
         interactive: bool = False,
+        detached: bool = False,
+        ulimit: builtins.list[str] | None = None,
         workdir: str | None = None,
         env_file: str | None = None,
         timeout: float = 30.0,
@@ -806,9 +856,15 @@ class Backend(ABC):
         server: str,
         username: str | None = None,
         password: str | None = None,
+        password_stdin: str | None = None,
         scheme: str | None = None,
     ) -> None:
-        """Login to a registry."""
+        """Login to a registry.
+
+        ``password`` (existing path) feeds ``--password-stdin`` directly;
+        ``password_stdin`` feeds the same flag via the ``input_text``
+        stdin channel of the CLI runner.
+        """
         ...
 
     @abstractmethod
@@ -1011,12 +1067,25 @@ class Backend(ABC):
         gid: int | None = None,
         interactive: bool = False,
         timeout: float = 60.0,
+        root: bool = False,
+        ulimit: builtins.list[str] | None = None,
+        detached: bool = False,
+        tty: bool = False,
+        user: str | None = None,
+        workdir: str | None = None,
     ) -> ExecResult:
         """Boot a machine if necessary and run a command inside it."""
         ...
 
     @abstractmethod
-    async def machine_logs(self, machine_id: str) -> str:
+    async def machine_logs(
+        self,
+        machine_id: str,
+        *,
+        boot: bool = False,
+        follow: bool = False,
+        tail: int | None = None,
+    ) -> str:
         """Dump a machine's boot/stdout logs as plain text."""
         ...
 
