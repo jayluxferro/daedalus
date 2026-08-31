@@ -652,20 +652,14 @@ cd ui && npm run dev
 
 ```
 mypy --strict daedalus/     → Success: no issues found in 27 source files
-pytest tests/ -q            → 420 passed, 2 skipped, 1 known failure (386 non-integration + 34 integration)
-pytest -m integration       → 34 passed, 2 skipped, 1 known failure (requires container daemon)
+pytest tests/ -q            → 421 passed, 2 skipped (386 non-integration + 35 integration)
+pytest -m integration       → 35 passed, 2 skipped (requires container daemon)
 Detonation §M7 test         → 2 live detonations: dropper vs no-op reports distinguishable, no leaks
 Proxy across 7 profiles     → All pass (CLI + API + MCP surfaces)
 UI build                    → TypeScript clean, 8/8 checks pass
 ruff check                  → cosmetic only (E501, SIM*, UP042)
 Import-time I/O             → zero subprocess calls
 ```
-
-The one known failure is `tests/integration/test_system_plane.py::test_registry_list_and_default_guard`
-(SPEC phase 9 W4): the registry-default fail-loud guard reads **stdout** only, but container 1.3.1
-writes its `unexpected arguments` error to **stderr**, so `registry_default_inspect()` returns `""`
-without raising. Fix: guard on combined stdout+stderr (`daedalus/core/cli_backend.py`
-`registry_default_inspect/set/unset`). Once fixed the suite is 421 passed, 2 skipped.
 
 ---
 
