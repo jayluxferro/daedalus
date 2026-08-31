@@ -24,6 +24,7 @@ from mcp.types import ToolAnnotations
 
 from daedalus.core.audit import ActorKind, AuditLog
 from daedalus.core.backend import (
+    ClusterCreateSpec,
     MachineCreateSpec,
     MachineInfo,
     MachineSetSettings,
@@ -34,6 +35,7 @@ from daedalus.core.backend import (
 )
 from daedalus.core.capabilities import ensure_daemon, probe
 from daedalus.core.cli_backend import CliBackend
+from daedalus.core.clusters import Clusters
 from daedalus.core.exceptions import DaedalusError, ValidationError
 from daedalus.core.forge import Forge
 from daedalus.core.icarus import ExecOptions, Icarus
@@ -56,6 +58,7 @@ class DaedalusContext:
 
     caps: object
     backend: CliBackend
+    clusters: Clusters
     forge: Forge
     icarus: Icarus
     machina: Machina
@@ -95,6 +98,7 @@ async def daedalus_lifespan(server: FastMCP) -> AsyncIterator[DaedalusContext]:
     ctx = DaedalusContext(
         caps=caps,
         backend=backend,
+        clusters=Clusters(backend, caps, policy=policy, audit=audit),
         forge=Forge(backend, caps, policy=policy, audit=audit, store=store),
         icarus=Icarus(backend, audit=audit, store=store, runtime_binary=caps.container_binary),
         machina=Machina(backend, caps, policy=policy, audit=audit),
@@ -208,6 +212,7 @@ Core capabilities:
 - Control system DNS via `daedalus_dns_*`
 - Manage persistent container machines via `daedalus_machine_*`
 - Manage named volumes (persistent disk images) via `daedalus_volume_*`
+- Manage local Kubernetes clusters via `daedalus_cluster_*`
 - Set the default container kernel via `daedalus_kernel_set`
 
 Multi-arch guests: pass `arch="x86_64"` to `daedalus_run`/`daedalus_create`
@@ -222,7 +227,7 @@ Safety rules:
 2. Destructive operations (`daedalus_destroy`, `daedalus_prune`,
    `daedalus_dns_delete`, `daedalus_network_delete`,
    `daedalus_machine_delete`, `daedalus_volume_delete`,
-   `daedalus_volume_prune`)
+   `daedalus_volume_prune`, `daedalus_cluster_delete`)
    require `confirm=True` and are logged in the audit trail
 3. The default `detonation` profile applies maximum isolation
 4. Kernel overrides require `confirm_kernel=True` on `daedalus_run`
@@ -2209,6 +2214,190 @@ async def daedalus_volume_prune(
         _audit_agent(dc, "volume_prune", {"confirm": confirm},
                      {"removed": removed})
         return _ok({"removed": removed, "count": len(removed)})
+    except DaedalusError as e:
+        return _err(e)
+
+
+# ==========================================================================
+# Clusters (container 1.3.1 — local Kubernetes development clusters)
+# ==========================================================================
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="List local Kubernetes clusters",
+        readOnlyHint=True,
+        idempotentHint=True,
+    ),
+)
+async def daedalus_cluster_list(ctx: Context | None = None) -> str:
+    """List local Kubernetes clusters, grouped per Orchard.
+
+    Returns a JSON array of {name, id, is_running, status, control_plane,
+    workers} objects; each node is {id, cluster_name, role,
+    is_control_plane, is_running, address}.
+    """
+    dc = _get_ctx(ctx)
+    try:
+        clusters = await dc.clusters.list()
+        return json.dumps([c.to_dict() for c in clusters])
+    except DaedalusError as e:
+        return _err(e)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Create a local Kubernetes cluster",
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=True,
+    ),
+)
+async def daedalus_cluster_create(
+    name: str,
+    node_image: str | None = None,
+    cpus: int | None = None,
+    memory: str | None = None,
+    remove: bool = False,
+    ctx: Context | None = None,
+) -> str:
+    """Create and start a local Kubernetes cluster.
+
+    ``name`` is required (the runtime would default to k8s-dev, but the
+    cluster name is load-bearing — the control-plane node id — so it is
+    explicit here).  ``node_image`` overrides the default node image,
+    ``cpus``/``memory`` size the nodes, ``remove=True`` removes the node
+    containers when the cluster stops.  Returns {name}.
+    """
+    assert ctx is not None
+    dc = _get_ctx(ctx)
+    try:
+        spec = ClusterCreateSpec(
+            name=name, node_image=node_image, cpus=cpus,
+            memory=memory, remove=remove,
+        )
+        cluster_name = await dc.clusters.create(spec)
+        _audit_agent(dc, "cluster_create", {
+            "name": name, "node_image": node_image, "cpus": cpus,
+            "memory": memory, "remove": remove,
+        }, {"name": cluster_name})
+        return _ok({"name": cluster_name})
+    except DaedalusError as e:
+        return _err(e)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Start a Kubernetes cluster",
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=True,
+    ),
+)
+async def daedalus_cluster_start(name: str, ctx: Context | None = None) -> str:
+    """Start a stopped Kubernetes cluster.  Returns {name, started}."""
+    assert ctx is not None
+    dc = _get_ctx(ctx)
+    try:
+        await dc.clusters.start(name)
+        _audit_agent(dc, "cluster_start", {"name": name})
+        return _ok({"name": name, "started": True})
+    except DaedalusError as e:
+        return _err(e)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Load an image into a Kubernetes cluster",
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=True,
+    ),
+)
+async def daedalus_cluster_load_image(
+    name: str,
+    image: str,
+    platform: str | None = None,
+    ctx: Context | None = None,
+) -> str:
+    """Load a container image into a cluster's containerd.
+
+    ``platform`` optionally pins the image platform (e.g.
+    "linux/arm64").  Returns {name, image, loaded}.
+    """
+    assert ctx is not None
+    dc = _get_ctx(ctx)
+    try:
+        await dc.clusters.load_image(name, image, platform=platform)
+        _audit_agent(dc, "cluster_load_image", {
+            "name": name, "image": image, "platform": platform,
+        })
+        return _ok({"name": name, "image": image, "loaded": True})
+    except DaedalusError as e:
+        return _err(e)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Write a cluster's kubeconfig",
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=True,
+    ),
+)
+async def daedalus_cluster_write_config(
+    name: str,
+    kubeconfig: str | None = None,
+    ctx: Context | None = None,
+) -> str:
+    """Write the cluster context to a kubeconfig file.
+
+    Pass ``kubeconfig`` as a path to write the config there; without it
+    the runtime's printed config text is captured and returned.
+    Returns {kubeconfig} — the written path, or the config text when no
+    path was given.
+    """
+    assert ctx is not None
+    dc = _get_ctx(ctx)
+    try:
+        config = await dc.clusters.write_config(name, kubeconfig=kubeconfig)
+        _audit_agent(dc, "cluster_write_config", {
+            "name": name, "kubeconfig": kubeconfig,
+        })
+        return _ok({"kubeconfig": config})
+    except DaedalusError as e:
+        return _err(e)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Delete a Kubernetes cluster permanently",
+        readOnlyHint=False,
+        destructiveHint=True,
+        idempotentHint=False,
+    ),
+)
+async def daedalus_cluster_delete(
+    name: str,
+    confirm: bool = False,
+    ctx: Context | None = None,
+) -> str:
+    """Delete a Kubernetes cluster. Requires confirm=True.
+
+    **WARNING**: Destructive operation. Must pass confirm=True.
+    The cluster's node containers are unrecoverable after deletion.
+    """
+    if not confirm:
+        raise ValueError(json.dumps({
+            "error": "confirm=True required for cluster deletion",
+            "code": "CONFIRM_REQUIRED",
+        }))
+    dc = _get_ctx(ctx)
+    try:
+        await dc.clusters.delete(name, confirm=True)
+        _audit_agent(dc, "cluster_delete", {"name": name, "confirm": confirm})
+        return _ok({"name": name, "deleted": True})
     except DaedalusError as e:
         return _err(e)
 

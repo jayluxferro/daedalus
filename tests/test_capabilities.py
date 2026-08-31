@@ -113,6 +113,8 @@ class TestCapabilityProbe:
         assert m.network_subcommand is True
         assert m.machine is True
         assert m.volume is True
+        assert m.k8s is True
+        assert m.system_property is True
 
     def test_probe_machine_gate(self):
         m = probe()
@@ -124,6 +126,12 @@ class TestCapabilityProbe:
         assert m.volume is True
         assert m.runtime_features["container_volumes"] is True
 
+    def test_probe_k8s_gate(self):
+        """1.3.1 ships the k8s plugin in its help tree → the gate is True."""
+        m = probe()
+        assert m.k8s is True
+        assert m.runtime_features["container_k8s"] is True
+
     def test_probe_new_runtime_features(self):
         m = probe()
         rf = m.runtime_features
@@ -134,6 +142,14 @@ class TestCapabilityProbe:
         assert rf["custom_networks"] is True
         assert rf["container_machines"] is True
         assert rf["container_volumes"] is True
+        assert rf["container_k8s"] is True
+        assert rf["system_properties"] is True
+
+    def test_probe_system_property_gate(self):
+        """``container system property --help`` exits 0 on 1.3.1 → gate True."""
+        m = probe()
+        assert m.system_property is True
+        assert m.runtime_features["system_properties"] is True
 
     def test_probe_init_image_gate(self):
         """--init-image is in run --help on 1.3.1 → the gate is True."""
@@ -152,6 +168,7 @@ class TestCapabilityProbe:
     def test_subcommands_reference_has_new_verbs(self):
         new_verbs = {
             "stats", "copy", "export", "prune", "network", "machine", "volume",
+            "k8s",
         }
         assert new_verbs <= SUBCOMMANDS
 
@@ -207,7 +224,7 @@ class TestCapabilityManifestUnit:
 
     @pytest.mark.parametrize("gate", [
         "stats", "copy", "export", "prune", "network_subcommand", "machine",
-        "volume",
+        "volume", "k8s", "system_property",
     ])
     def test_new_verb_gates_default_untested(self, gate):
         m = CapabilityManifest()
@@ -222,6 +239,8 @@ class TestCapabilityManifestUnit:
             network_subcommand=True,
             machine=True,
             volume=True,
+            k8s=True,
+            system_property=True,
         )
         rf = _runtime_features(m)
         assert rf["container_stats"] is True
@@ -231,6 +250,8 @@ class TestCapabilityManifestUnit:
         assert rf["custom_networks"] is True
         assert rf["container_machines"] is True
         assert rf["container_volumes"] is True
+        assert rf["container_k8s"] is True
+        assert rf["system_properties"] is True
 
         m = CapabilityManifest()
         rf = _runtime_features(m)
@@ -241,6 +262,8 @@ class TestCapabilityManifestUnit:
         assert rf["custom_networks"] is False
         assert rf["container_machines"] is False
         assert rf["container_volumes"] is False
+        assert rf["container_k8s"] is False
+        assert rf["system_properties"] is False
 
     def test_as_dict_includes_new_fields(self):
         m = CapabilityManifest(
@@ -251,6 +274,8 @@ class TestCapabilityManifestUnit:
             network_subcommand=True,
             machine=True,
             volume=True,
+            k8s=True,
+            system_property=True,
         )
         d = m.as_dict()
         assert d["stats"] is True
@@ -260,6 +285,8 @@ class TestCapabilityManifestUnit:
         assert d["network_subcommand"] is True
         assert d["machine"] is True
         assert d["volume"] is True
+        assert d["k8s"] is True
+        assert d["system_property"] is True
 
     def test_summary_includes_new_gates(self):
         m = CapabilityManifest(
@@ -270,6 +297,8 @@ class TestCapabilityManifestUnit:
             network_subcommand=True,
             machine=True,
             volume=True,
+            k8s=True,
+            system_property=True,
         )
         summary = m.summary()
         assert "stats:        ✓ yes" in summary
@@ -279,6 +308,8 @@ class TestCapabilityManifestUnit:
         assert "net-subcmd:   ✓ yes" in summary
         assert "machine:      ✓ yes" in summary
         assert "volume:       ✓ yes" in summary
+        assert "k8s-plugin:   ✓ yes" in summary
+        assert "system-prop:  ✓ yes" in summary
 
     def test_probe_subcommand_helper(self):
         assert _probe_subcommand("/usr/bin/true") is True

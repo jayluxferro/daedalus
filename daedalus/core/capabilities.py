@@ -58,6 +58,7 @@ class CapabilityManifest:
     virtualization_nested: bool | str = "untested"
     builder: bool | str = "untested"
     system_dns: bool | str = "untested"
+    system_property: bool | str = "untested"
     gpu: bool | str = "untested"
     stats: bool | str = "untested"
     copy: bool | str = "untested"
@@ -66,6 +67,7 @@ class CapabilityManifest:
     network_subcommand: bool | str = "untested"
     machine: bool | str = "untested"
     volume: bool | str = "untested"
+    k8s: bool | str = "untested"
     security_safe: bool | str = "untested"
 
     # -- flag inventory (from --help parsing) ----------------------------
@@ -114,6 +116,7 @@ class CapabilityManifest:
             f"nested-virt:  {self._fmt(self.virtualization_nested)}",
             f"builder:      {self._fmt(self.builder)}",
             f"system-dns:   {self._fmt(self.system_dns)}",
+            f"system-prop:  {self._fmt(self.system_property)}",
             f"gpu:          {self._fmt(self.gpu)}",
             f"stats:        {self._fmt(self.stats)}",
             f"copy:         {self._fmt(self.copy)}",
@@ -122,6 +125,7 @@ class CapabilityManifest:
             f"net-subcmd:   {self._fmt(self.network_subcommand)}",
             f"machine:      {self._fmt(self.machine)}",
             f"volume:       {self._fmt(self.volume)}",
+            f"k8s-plugin:   {self._fmt(self.k8s)}",
             "security:     "
             + (
                 "✓ ≥ 1.3.1 advisories fixed"
@@ -180,7 +184,7 @@ SUBCOMMANDS: set[str] = {
     "create", "delete", "exec", "inspect", "kill", "list", "logs",
     "run", "start", "stop", "build", "images", "image", "registry",
     "builder", "system", "stats", "copy", "export", "prune", "network",
-    "machine", "volume",
+    "machine", "volume", "k8s",
 }
 
 
@@ -247,6 +251,11 @@ def probe(*, container_path: str | None = None) -> CapabilityManifest:
     m.network_subcommand = _probe_network_subcommand(m)
     m.machine = _probe_subcommand(m.container_binary, "machine")
     m.volume = _probe_subcommand(m.container_binary, "volume")
+    m.k8s = _probe_subcommand(m.container_binary, "k8s")
+    # Nested subcommand: the generic helper appends --help, so this runs
+    # ``container system property --help`` — exactly the surface probe for
+    # the ``system property`` verb family (SPEC phase 9 §2).
+    m.system_property = _probe_subcommand(m.container_binary, "system", "property")
     m.runtime_features = _runtime_features(m)
 
     m.probe_time = _now()
@@ -531,6 +540,8 @@ def _runtime_features(m: CapabilityManifest) -> dict[str, bool | str]:
         "container_prune": m.prune is True,
         "container_machines": m.machine is True,
         "container_volumes": m.volume is True,
+        "container_k8s": m.k8s is True,
+        "system_properties": m.system_property is True,
         "shared_default_network": m.networking is True,
         "security_advisories_fixed": m.security_safe is True,
     }

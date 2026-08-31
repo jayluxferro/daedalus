@@ -433,6 +433,7 @@ anything still gated lives in the "container reality" note below.
 | mint | pull, push, save, load, tag, delete, inspect, list, prune, build | CLI, API, MCP |
 | talos | network CRUD — create/list/inspect/delete (default plugin `container-network-vmnet`), topology materialization via `apply_topology` | CLI, API, MCP |
 | machina | machine create/list/inspect/set/set-default/stop/delete/run/logs — persistent stateful VMs with init-capability advisor (name heuristic + log check) and confirm-gated delete | CLI, API, MCP |
+| k8s | local Kubernetes clusters via the `k8s` plugin — create/list/start/load-image/write-config/delete, grouped client-side from the container list (``owningPlugin: k8s`` label; cluster name == control-plane id, workers as ``<cluster>-worker-N`` — the same model as Orchard's ClusterService); confirm-gated delete | CLI, API, MCP, UI |
 | talos | DNS control (`--dns`, `--dns-domain`, `--dns-search`, `--no-dns`), system DNS (create/delete/list) | CLI, API, MCP |
 | forge | prune — stop + reclaim disk via `container prune` | CLI, API, MCP |
 | forge | detonate — the full orchestrated loop (runtime-security floor gate → policy gate → disposable internal network → pre/post FS export diff → sample delivery to /root → exec + stats sampling → Minos report + risk score → store artifacts + audit → destroy). §5.1, SPEC phase 3 | CLI, API, MCP |
@@ -464,8 +465,15 @@ from the boot logs); machine **backing containers are hidden by the CLI** (the d
 `container list` never shows them), and `container prune` does not touch machines.  Machine
 **live-stats are runtime-gated** for the same reason: the daemon hides machine backing
 containers from `stats` too, so the sampling engine cannot re-key per-machine CPU/memory
-history — a SPEC phase 5 non-goal, documented rather than worked around.  The CLI also
-ships a `k8s` plugin — it exists but is **not yet wrapped** by daedalus.
+history — a SPEC phase 5 non-goal, documented rather than worked around.  The CLI's `k8s`
+plugin is **fully wrapped** by the `clusters` subsystem (SPEC phase 8): create/list/start/
+load-image/write-config/delete across CLI, API, MCP and UI, with Orchard's grouping model
+(cluster name == control-plane node id; workers `<cluster>-worker-N`) applied client-side
+over the container list's `owningPlugin: k8s` label.  Live create is heavy (node-image pull
++ control-plane VM boots, minutes) and **fails at the plugin's node-prep step on the
+capture host** (kubeadm init inside the node VM errors out with an opaque tail; the raw
+CLI fails identically — upstream, not daedalus), so the integration suite guards the
+round-trip behind `DAEDALUS_K8S_LIVE_TEST=1` and skips with a note when node boot dies.
 Run/create flags are fully serialised — the complete 51-flag surface (incl. `--rosetta`,
 `--virtualization`, `--publish-socket`, `--shm-size`, `--ulimit`, `--init`, `--kernel-arg`,
 `--masked-path`, `--read-only-path`) is wrapped by `RunSpec.to_cli_args()` (SPEC phase 7
@@ -480,13 +488,13 @@ Registry scheme is `--scheme http|https` only — **`auto` was removed in contai
 ### Quality gates (all passing)
 
 ```
-mypy --strict daedalus/     → Success: no issues found in 26 source files
-pytest tests/               → 341 passed, 1 skipped (312 unit + 29 integration; the slow systemd machine-boot test skips on the container exec limitation, upstream apple/container#1669)
+mypy --strict daedalus/     → Success: no issues found in 27 source files
+pytest tests/               → 417 passed, 2 skipped (386 non-integration + 31 integration; the slow systemd machine-boot test skips on the container exec limitation, upstream apple/container#1669; the k8s create round-trip is opt-in via `DAEDALUS_K8S_LIVE_TEST=1` — live clusters are heavy)
 Detonation §M7 test         → 2 live detonations: dropper vs no-op reports distinguishable, no VM/network leaks (tests/integration/test_detonation.py)
 Import-time I/O             → zero subprocess calls
-MCP (stdio)                 → 67 tools, handshake verified
+MCP (stdio)                 → 73 tools, handshake verified
 MCP (cartograph federation) → discover + call verified
-API (FastAPI)               → /health, /stats, /stats/history, /stats/stream, /networks, /containers, /images, /profiles, /system/status, /detonate, /experiments
+API (FastAPI)               → /health, /stats, /stats/history, /stats/stream, /networks, /containers, /images, /profiles, /system/status, /detonate, /experiments, /clusters
 ```
 
 ---

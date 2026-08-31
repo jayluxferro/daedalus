@@ -117,6 +117,15 @@ daedalus machine list
 daedalus machine run test-m uname -a                        # boots the machine, runs the command
 daedalus machine stop test-m
 daedalus machine delete test-m --confirm
+
+# 9. K8s clusters (container 1.3.1 k8s plugin — local Kubernetes dev clusters)
+# NOTE: cluster create is HEAVY — it pulls the k8s node image (hundreds of MB)
+# and boots control-plane VMs, taking minutes. Run it deliberately.
+daedalus k8s create --name dev            # create + start a single-node cluster
+daedalus k8s list                         # grouped table: cluster, control-plane, workers, addresses
+daedalus k8s write-config dev             # print the kubeconfig → pipe it to kubectl --kubeconfig
+daedalus k8s load-image dev alpine:latest # load a local image into the cluster's containerd
+daedalus k8s delete dev --confirm         # delete the cluster (confirm required)
 ```
 
 ---
@@ -210,6 +219,15 @@ daedalus machine logs test-m           # boot/stdout log dump
 daedalus machine stop test-m
 daedalus machine delete test-m --confirm
 
+# K8s clusters (container 1.3.1 k8s plugin — opt-in heavy: create pulls the
+# node image + boots control-plane VMs, minutes; see Quick Start §9)
+daedalus k8s create --name dev            # create + start a cluster (-c cpus, -m memory, --rm)
+daedalus k8s list                         # grouped table (--json for machine-readable)
+daedalus k8s start dev                    # start a stopped cluster
+daedalus k8s load-image dev alpine:latest # load a local image into the cluster
+daedalus k8s write-config dev             # print kubeconfig (--kubeconfig PATH to write a file)
+daedalus k8s delete dev --confirm         # delete (--confirm required)
+
 # Images
 daedalus image-pull debian:latest     # Pull from registry
 daedalus image-list                   # List local images
@@ -236,6 +254,7 @@ daedalus profiles                     # List security profiles
 | `prune` | Remove stopped containers, reclaim disk (requires --confirm) |
 | `network` | Network CRUD subcommands: `create`, `list`, `inspect`, `delete` |
 | `machine` | Machine subcommands: `create`, `list`, `inspect`, `set`, `set-default`, `stop`, `delete` (requires `--confirm`), `run`, `logs` |
+| `k8s` | Cluster subcommands: `create` (opt-in heavy — pulls node image + boots VMs), `list`, `start`, `load-image`, `write-config`, `delete` (requires `--confirm`) |
 | `image-pull` | Pull image from registry |
 | `image-list` | List local images |
 | `system-status` | Daemon + version + container count |
@@ -319,6 +338,12 @@ python -m daedalus.api.server
 | DELETE | `/machines/{id}` | Delete a machine (`?confirm=true` required) |
 | POST | `/machines/{id}/run` | Boot + run command (`{"command":["uname","-a"]}` → ExecResult) |
 | GET | `/machines/{id}/logs` | Machine boot/stdout logs |
+| GET | `/clusters` | List Kubernetes clusters, grouped per cluster (`name`, `status`, `control_plane`, `workers`) |
+| POST | `/clusters` | Create + start a cluster (`{"name","node_image"?,"cpus"?,"memory"?,"remove"?,"scheme"?}` — opt-in heavy: pulls node image + boots VMs, minutes) |
+| POST | `/clusters/{name}/start` | Start a stopped cluster |
+| POST | `/clusters/{name}/load-image` | Load an image into the cluster's containerd (`{"image","platform"?}`) |
+| GET | `/clusters/{name}/kubeconfig` | The cluster's kubeconfig text |
+| DELETE | `/clusters/{name}` | Delete a cluster (`?confirm=true` required) |
 | GET | `/profiles` | List security profiles |
 | GET | `/system/status` | Daemon status + counts + disk usage |
 | GET | `/system/audit` | Audit log (`?operation=run&limit=50`) |
@@ -352,6 +377,10 @@ curl -X POST http://127.0.0.1:8420/machines \
   -H 'Content-Type: application/json' \
   -d '{"image":"alpine:latest","name":"test-m","no_boot":true}'
 curl -X DELETE http://127.0.0.1:8420/machines/test-m?confirm=true | jq .
+curl http://127.0.0.1:8420/clusters | jq .
+curl http://127.0.0.1:8420/clusters/dev/kubeconfig | jq -r .kubeconfig > ~/.kube/daedalus-dev.yaml
+kubectl --kubeconfig ~/.kube/daedalus-dev.yaml get nodes
+curl -X DELETE http://127.0.0.1:8420/clusters/dev?confirm=true | jq .
 curl -X POST http://127.0.0.1:8420/detonate \
   -H 'Content-Type: application/json' \
   -d '{"sample":"/path/to/suspicious.elf","observe_seconds":30}' | jq .
@@ -380,6 +409,7 @@ open http://127.0.0.1:8420/ui
 | **Logs** | Container selector, boot/stdout toggle, live log stream |
 | **Audit** | Tamper-evident audit trail with filters |
 | **Profiles** | Security profile cards showing configured settings |
+| **Clusters** | Kubernetes cluster cards (status, nodes, addresses), create form, per-cluster start / load-image / view-kubeconfig / delete |
 
 **Creating a container in the UI:**
 
@@ -451,6 +481,12 @@ Add to your `mcp.json` or `~/.claude/config.json`:
 | `daedalus_machine_run` | Boot + run a command inside a machine |
 | `daedalus_machine_logs` | Machine boot/stdout logs |
 | `daedalus_machine_delete` | Delete a machine (requires `confirm=true`) |
+| `daedalus_cluster_list` | List Kubernetes clusters, grouped per cluster (`readOnlyHint=true`) |
+| `daedalus_cluster_create` | Create + start a cluster (opt-in heavy — pulls node image + boots VMs, minutes; `remove=true` cleans up on stop) |
+| `daedalus_cluster_start` | Start a stopped cluster |
+| `daedalus_cluster_load_image` | Load a local image into a cluster's containerd |
+| `daedalus_cluster_write_config` | Print the cluster's kubeconfig text (`kubeconfig` path to write a file instead) |
+| `daedalus_cluster_delete` | Delete a cluster (`destructiveHint=true`, requires `confirm=true`) |
 | `daedalus_profiles` | List security profiles |
 
 ---
@@ -584,9 +620,9 @@ cd ui && npm run dev
 ## Quality Gates
 
 ```
-mypy --strict daedalus/     → Success: no issues found in 26 source files
-pytest tests/ -q            → 341 passed, 1 skipped (312 unit + 29 integration)
-pytest -m integration       → 29 passed, 1 skipped (requires container daemon)
+mypy --strict daedalus/     → Success: no issues found in 27 source files
+pytest tests/ -q            → 417 passed, 2 skipped (386 non-integration + 31 integration)
+pytest -m integration       → 31 passed, 2 skipped (requires container daemon)
 Detonation §M7 test         → 2 live detonations: dropper vs no-op reports distinguishable, no leaks
 Proxy across 7 profiles     → All pass (CLI + API + MCP surfaces)
 UI build                    → TypeScript clean, 8/8 checks pass

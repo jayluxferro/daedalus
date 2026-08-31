@@ -10,8 +10,11 @@ Structured JSON output is available for these commands:
 * ``container builder status --json``
 * ``container network list --format json``
 * ``container stats --no-stream --format json``
+* ``container system version --format json``
+* ``container system df --format json``
 
-All other commands produce text output that must be parsed.
+All other commands produce text output that must be parsed
+(``container system property list`` emits TOML).
 """
 
 from __future__ import annotations
@@ -22,11 +25,13 @@ import json
 import os
 import shutil
 import time
+import tomllib
 from typing import Any
 
 from daedalus.core.backend import (
     Backend,
     BuildSpec,
+    ClusterCreateSpec,
     ContainerInfo,
     ContainerState,
     ExecResult,
@@ -393,6 +398,131 @@ class OutputParser:
             options={str(k): str(v) for k, v in options.items()},
             raw=item,
         )
+
+    # -- k8s plugin (container 1.3.1) --------------------------------------
+
+    @staticmethod
+    def k8s_nodes(text: str) -> list[dict[str, Any]]:
+        """Parse ``container list --format json`` and keep k8s node containers.
+
+        ``container k8s list`` renders a human table only (no JSON form),
+        so the backend reads the raw container list and filters it
+        client-side — the same source Orchard's ClusterService groups
+        from (SPEC phase 8 §2).  Cluster node containers are marked with
+        the plugin label ``com.apple.container.plugin == "k8s"`` (the
+        spec's ``owningPlugin: k8s``); their ``pluginRole``
+        (control-plane|worker) rides along in the raw dicts for the
+        engine to group on.
+        """
+        data = OutputParser.json(text)
+        items: list[dict[str, Any]] = []
+        if isinstance(data, list):
+            items = [item for item in data if isinstance(item, dict)]
+        elif isinstance(data, dict) and data:
+            items = [data]
+        nodes: list[dict[str, Any]] = []
+        for item in items:
+            cfg = item.get("configuration", {})
+            if not isinstance(cfg, dict):
+                cfg = {}
+            labels = cfg.get("labels", {})
+            if isinstance(labels, dict) and labels.get("com.apple.container.plugin") == "k8s":
+                nodes.append(item)
+        return nodes
+
+    # -- system (SPEC phase 9 §2 — captured live on container 1.3.1) ----
+
+    @staticmethod
+    def system_properties(text: str) -> dict[str, str]:
+        """Parse ``container system property list`` output into a flat dict.
+
+        The live 1.3.1 output is TOML (the ``--format`` default): sectioned
+        tables like ``[kernel]`` with ``binaryPath = "…"`` entries.  Tables
+        are flattened with dot notation (``build.cpus`` → ``"2"``) and
+        every value is stringified (booleans → ``"true"``/``"false"``), so
+        the result is a display-ready ``dict[str, str]``.  Empty tables
+        (``[dns]``, ``[network]``) contribute no keys.  Unparseable input
+        (e.g. a host that never emits TOML) yields ``{}``.
+        """
+        try:
+            data = tomllib.loads(text)
+        except tomllib.TOMLDecodeError:
+            return {}
+        flat: dict[str, str] = {}
+
+        def walk(node: Any, prefix: str) -> None:
+            if isinstance(node, dict):
+                for key, value in node.items():
+                    child = f"{prefix}.{key}" if prefix else str(key)
+                    walk(value, child)
+            elif isinstance(node, bool):
+                # Match the TOML source spelling (``true``/``false``) —
+                # Python's str() would render ``True``/``False``.
+                flat[prefix] = "true" if node else "false"
+            else:
+                flat[prefix] = str(node)
+
+        walk(data, "")
+        return flat
+
+    @staticmethod
+    def system_version(text: str) -> dict[str, Any]:
+        """Parse ``container system version --format json`` output.
+
+        The wire is a JSON array of ``{appName, buildType, commit,
+        version}`` objects (one per service — ``container`` and
+        ``container-apiserver`` on 1.3.1).  The result is keyed by
+        ``appName`` so consumers can look up either service.
+        """
+        data = OutputParser.json(text)
+        result: dict[str, Any] = {}
+        if isinstance(data, list):
+            items = data
+        elif isinstance(data, dict):
+            items = [data]
+        for item in items:
+            if isinstance(item, dict) and item.get("appName"):
+                result[str(item["appName"])] = item
+        return result
+
+    @staticmethod
+    def system_df_json(text: str) -> dict[str, Any]:
+        """Parse ``container system df --format json`` output (SPEC phase 9 §2).
+
+        Live 1.3.1 shape — per-category objects carrying the runtime's own
+        store accounting::
+
+            {"containers": {"active": 0, "reclaimable": …, "sizeInBytes": …, "total": 1},
+             "images":     {"active": 1, "reclaimable": …, "sizeInBytes": …, "total": 14},
+             "volumes":    {"active": 0, "reclaimable": …, "sizeInBytes": …, "total": 0}}
+
+        ``used`` is the sum of the per-category ``sizeInBytes`` (the store
+        footprint).  The df JSON reports **no free-space or capacity
+        figure**, so ``total`` mirrors ``used`` here and ``free`` is
+        omitted — the backend merges host-volume measurements for those
+        keys (policy's min-free check needs real free space).  Non-JSON or
+        unexpected output yields ``{}``.
+        """
+        data = OutputParser.json(text)
+        if not isinstance(data, dict):
+            return {}
+        categories: dict[str, dict[str, Any]] = {}
+        for name in ("containers", "images", "volumes"):
+            cat = data.get(name)
+            if isinstance(cat, dict):
+                categories[name] = {str(k): v for k, v in cat.items()}
+        used = sum(
+            int(cat.get("sizeInBytes", 0) or 0) for cat in categories.values()
+        )
+        if not categories:
+            return {}
+        return {
+            "containers": categories.get("containers", {}),
+            "images": categories.get("images", {}),
+            "volumes": categories.get("volumes", {}),
+            "used": used,
+            "total": used,
+        }
 
 
 # ==========================================================================
@@ -899,6 +1029,59 @@ class CliBackend(Backend):
         return OutputParser.lines(out)
 
     # ==================================================================
+    # k8s plugin (container 1.3.1)
+    # ==================================================================
+
+    async def k8s_create(self, spec: ClusterCreateSpec) -> str:
+        self._require("container_k8s")
+        _, out, _ = await _run_cli_impl(
+            "k8s", "create", *spec.to_cli_args(), binary=self._binary,
+        )
+        # The CLI echoes the cluster name on stdout when it does;
+        # otherwise the requested name is authoritative (verified: the
+        # name is set via --name — there is no positional argument).
+        lines = OutputParser.lines(out)
+        return lines[0] if lines else spec.name
+
+    async def k8s_list(self) -> list[dict[str, Any]]:
+        self._require("container_k8s")
+        _, out, _ = await _run_cli_impl(
+            "list", "--format", "json", binary=self._binary,
+        )
+        return OutputParser.k8s_nodes(out)
+
+    async def k8s_delete(self, name: str) -> None:
+        self._require("container_k8s")
+        await _run_cli_impl("k8s", "delete", "--name", name, binary=self._binary)
+
+    async def k8s_start(self, name: str) -> None:
+        self._require("container_k8s")
+        await _run_cli_impl("k8s", "start", "--name", name, binary=self._binary)
+
+    async def k8s_load_image(
+        self, name: str, image: str, *, platform: str | None = None,
+    ) -> None:
+        self._require("container_k8s")
+        cmd = ["k8s", "load-image", "--name", name, image]
+        if platform:
+            cmd += ["--platform", platform]
+        await _run_cli_impl(*cmd, binary=self._binary)
+
+    async def k8s_write_config(
+        self, name: str, *, kubeconfig: str | None = None,
+    ) -> str:
+        self._require("container_k8s")
+        cmd = ["k8s", "write-config", "--name", name]
+        if kubeconfig:
+            # Explicit path: the CLI writes/merges the file — return it.
+            cmd += ["--kubeconfig", kubeconfig]
+            await _run_cli_impl(*cmd, binary=self._binary)
+            return kubeconfig
+        # No path: the CLI prints the config text — return it as-is.
+        _, out, _ = await _run_cli_impl(*cmd, binary=self._binary)
+        return out
+
+    # ==================================================================
     # Interaction
     # ==================================================================
 
@@ -1193,11 +1376,102 @@ class CliBackend(Backend):
         )
         return OutputParser.lines(out)
 
-    async def system_df(self) -> dict[str, Any]:
-        """Disk usage — measured at the OS level via ``shutil.disk_usage``.
+    async def system_property_list(self) -> dict[str, str]:
+        self._require("system_properties")
+        _, out, _ = await _run_cli_impl(
+            "system", "property", "list", binary=self._binary,
+        )
+        # The default --format is toml (verified live on 1.3.1; the JSON
+        # form exists too, but the default is the widest-compatible wire).
+        return OutputParser.system_properties(out)
 
-        (``container system df`` exists in 1.2.2, but this host-side
-        measurement is the one policy checks compare against.)
+    async def system_property_get(self, key: str) -> str:
+        self._require("system_properties")
+        exit_code, out, _ = await _run_cli_impl(
+            "system", "property", "get", key,
+            binary=self._binary, check=False,
+        )
+        # Verified live on 1.3.1: the CLI has NO property get — it answers
+        # with a usage error on stderr, exit code 64.  Future hosts with a
+        # real get exit 0; on this host we fail loudly instead of leaking
+        # the usage text as if it were the property value.
+        if exit_code != 0:
+            raise CapabilityError(
+                message=(
+                    f"system property get is not available on this host "
+                    f"(container {self._caps.container_version} exposes only "
+                    f"'system property list')"
+                ),
+                feature="system_property_get",
+                container_version=self._caps.container_version,
+            )
+        return out.strip()
+
+    async def system_property_set(self, key: str, value: str) -> None:
+        self._require("system_properties")
+        exit_code, _, _ = await _run_cli_impl(
+            "system", "property", "set", key, value,
+            binary=self._binary, check=False,
+        )
+        # Same 1.3.1 finding as get: no property set exists (usage error,
+        # exit 64).  See ``system_property_get`` for the rationale.
+        if exit_code != 0:
+            raise CapabilityError(
+                message=(
+                    f"system property set is not available on this host "
+                    f"(container {self._caps.container_version} exposes only "
+                    f"'system property list')"
+                ),
+                feature="system_property_set",
+                container_version=self._caps.container_version,
+            )
+
+    async def system_version(self) -> dict[str, Any]:
+        _, out, _ = await _run_cli_impl(
+            "system", "version", "--format", "json", binary=self._binary,
+        )
+        return OutputParser.system_version(out)
+
+    async def system_df(self) -> dict[str, Any]:
+        """Disk usage — runtime store usage when JSON is available.
+
+        Preferred path: ``container system df --format json`` (verified
+        live on 1.3.1).  ``used``/``store_bytes`` come from the runtime's
+        own accounting (sum of per-category ``sizeInBytes``) and the raw
+        per-category breakdown is preserved.  The df JSON reports **no
+        free-space or capacity figure**, so ``total``/``free`` still come
+        from the host-volume measurement — policy's min-free check needs
+        real free space, which only the OS can report.  The fully
+        OS-level measurement (``shutil.disk_usage``) is kept as the
+        fallback for hosts whose ``system df`` does not emit JSON.
+        """
+        data: dict[str, Any] = {}
+        try:
+            exit_code, out, _ = await _run_cli_impl(
+                "system", "df", "--format", "json",
+                binary=self._binary, check=False,
+            )
+            if exit_code == 0:
+                data = OutputParser.system_df_json(out)
+        except Exception:
+            data = {}
+        if data:
+            host = await self._os_disk_usage()
+            return {
+                "total": host.get("total", data["total"]),
+                "used": data["used"],
+                "free": host.get("free", 0),
+                "path": host.get("path", ""),
+                "store_bytes": data["used"],
+                "containers": data["containers"],
+                "images": data["images"],
+                "volumes": data["volumes"],
+                "source": "container system df --format json",
+            }
+        return await self._os_disk_usage()
+
+    async def _os_disk_usage(self) -> dict[str, Any]:
+        """OS-level disk measurement — the fallback df source.
 
         Returns volume stats plus ``store_bytes``: actual size of the Apple
         container data directory (used for policy checks).  ``used`` is the

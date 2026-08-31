@@ -11,6 +11,7 @@ import pytest
 from daedalus.core.backend import (
     Backend,
     BuildSpec,
+    ClusterCreateSpec,
     ContainerInfo,
     ContainerState,
     ExecResult,
@@ -67,6 +68,21 @@ class MockBackend(Backend):
         self.machine_logs_result: str = ""
         self.volumes: dict[str, VolumeInfo] = {}
         self.volume_calls: list[tuple[str, tuple]] = []
+        self.k8s_calls: list[tuple[str, tuple]] = []
+        self.system_properties: dict[str, str] = {
+            "build.cpus": "2", "machine.cpus": "8",
+        }
+        self.system_property_calls: list[tuple[str, tuple]] = []
+        self.system_version_result: dict = {
+            "container": {
+                "appName": "container", "buildType": "release",
+                "commit": "abc", "version": "1.3.1",
+            },
+            "container-apiserver": {
+                "appName": "container-apiserver", "buildType": "release",
+                "commit": "abc", "version": "1.3.1",
+            },
+        }
 
     def _cid(self) -> str:
         cid = f"mock-{self.next_id:04d}"
@@ -216,6 +232,17 @@ class MockBackend(Backend):
         return []
     async def system_df(self) -> dict:
         return {"total": 100_000_000_000, "used": 5_000_000_000, "free": 95_000_000_000}
+    async def system_property_list(self) -> dict[str, str]:
+        self.system_property_calls.append(("list", ()))
+        return dict(self.system_properties)
+    async def system_property_get(self, key: str) -> str:
+        self.system_property_calls.append(("get", (key,)))
+        return self.system_properties.get(key, "")
+    async def system_property_set(self, key: str, value: str) -> None:
+        self.system_property_calls.append(("set", (key, value)))
+        self.system_properties[key] = value
+    async def system_version(self) -> dict:
+        return dict(self.system_version_result)
 
     # -- stats / copy / export / prune / network (no-op canned stubs) --
     async def stats(self, container_id: str | None = None) -> list[StatsSample]:
@@ -316,6 +343,27 @@ class MockBackend(Backend):
         removed = list(self.volumes.keys())
         self.volumes.clear()
         return removed
+
+    # -- k8s plugin (canned call-recording stubs) --
+    async def k8s_create(self, spec: ClusterCreateSpec) -> str:
+        self.k8s_calls.append(("create", (spec,)))
+        return spec.name
+    async def k8s_list(self) -> list[dict]:
+        self.k8s_calls.append(("list", ()))
+        return []
+    async def k8s_delete(self, name: str) -> None:
+        self.k8s_calls.append(("delete", (name,)))
+    async def k8s_start(self, name: str) -> None:
+        self.k8s_calls.append(("start", (name,)))
+    async def k8s_load_image(
+        self, name: str, image: str, *, platform: str | None = None,
+    ) -> None:
+        self.k8s_calls.append(("load_image", (name, image, platform)))
+    async def k8s_write_config(
+        self, name: str, *, kubeconfig: str | None = None,
+    ) -> str:
+        self.k8s_calls.append(("write_config", (name, kubeconfig)))
+        return kubeconfig or "apiVersion: v1\nclusters: []\n"
 
     async def _run_cli(self, *args: str, **kwargs: object) -> tuple[int, str, str]:
         return (0, "", "")
@@ -506,6 +554,71 @@ class TestSystem:
         status = await forge.system_status()
         assert status.container_count == 2
         assert status.running_count == 2
+
+
+# ------------------------------------------------------------------
+# System property / version wrappers (SPEC phase 9, W1)
+# ------------------------------------------------------------------
+
+
+class TestSystemProperties:
+    async def test_list_delegates(self, forge: Forge):
+        backend = forge.backend
+        assert isinstance(backend, MockBackend)
+        props = await forge.system_property_list()
+        assert props == {"build.cpus": "2", "machine.cpus": "8"}
+        assert backend.system_property_calls == [("list", ())]
+
+    async def test_get_delegates(self, forge: Forge):
+        backend = forge.backend
+        assert isinstance(backend, MockBackend)
+        value = await forge.system_property_get("build.cpus")
+        assert value == "2"
+        assert backend.system_property_calls == [("get", ("build.cpus",))]
+
+    async def test_set_delegates_and_audits(self, forge: Forge):
+        backend = forge.backend
+        assert isinstance(backend, MockBackend)
+        await forge.system_property_set("build.cpus", "8")
+        assert backend.system_properties["build.cpus"] == "8"
+        assert backend.system_property_calls == [("set", ("build.cpus", "8"))]
+        entries = forge._audit.query(operation="system_property_set")
+        assert len(entries) == 1
+        entry = entries[0]
+        assert entry.actor == "forge"
+        assert entry.args == {"key": "build.cpus", "value": "8"}
+
+    async def test_reads_are_not_audited(self, forge: Forge):
+        await forge.system_property_list()
+        await forge.system_property_get("build.cpus")
+        assert forge._audit.query(operation="system_property_set") == []
+
+    async def test_version_delegates(self, forge: Forge):
+        backend = forge.backend
+        assert isinstance(backend, MockBackend)
+        version = await forge.system_version()
+        assert version == backend.system_version_result
+        assert version["container"]["version"] == "1.3.1"
+        assert version["container-apiserver"]["version"] == "1.3.1"
+
+    async def test_system_status_includes_version(self, forge: Forge):
+        status = await forge.system_status()
+        assert status.version["container"]["version"] == "1.3.1"
+
+    async def test_system_status_resilient_when_version_fails(
+        self, forge: Forge, monkeypatch: pytest.MonkeyPatch,
+    ):
+        """A failing version verb must not take system_status down."""
+        backend = forge.backend
+
+        async def _boom() -> dict:
+            raise RuntimeError("no version verb")
+
+        monkeypatch.setattr(backend, "system_version", _boom)
+        status = await forge.system_status()
+        assert status.version == {}
+        assert status.container_version == "0.1.0"
+        assert "total" in status.disk_usage
 
 
 # ------------------------------------------------------------------

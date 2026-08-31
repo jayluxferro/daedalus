@@ -104,6 +104,7 @@ class SystemStatus:
     container_count: int = 0
     running_count: int = 0
     disk_usage: dict[str, Any] = field(default_factory=dict)
+    version: dict[str, Any] = field(default_factory=dict)
     capabilities: dict[str, Any] = field(default_factory=dict)
 
 
@@ -696,6 +697,13 @@ class Forge:
             total = 0
             running = 0
 
+        # Best-effort: the version verb must never take the status down
+        # (e.g. a host without ``system version``) — keep status resilient.
+        try:
+            version = await self._backend.system_version()
+        except Exception:
+            version = {}
+
         return SystemStatus(
             apiserver_running=bool(self._capabilities.apiserver_running),
             container_version=self._capabilities.container_version,
@@ -703,8 +711,33 @@ class Forge:
             container_count=total,
             running_count=running,
             disk_usage=disk,
+            version=version,
             capabilities=self._capabilities.as_dict(),
         )
+
+    async def system_property_list(self) -> dict[str, str]:
+        """List system property values (read-only — no audit entry)."""
+        return await self._backend.system_property_list()
+
+    async def system_property_get(self, key: str) -> str:
+        """Read a single system property value (read-only — no audit entry)."""
+        return await self._backend.system_property_get(key)
+
+    async def system_property_set(self, key: str, value: str) -> None:
+        """Set a system property value (audited — a host configuration change)."""
+        await self._backend.system_property_set(key, value)
+        self._audit.record(
+            "system_property_set", actor="forge", actor_kind=ActorKind.SERVICE,
+            args={"key": key, "value": value},
+        )
+
+    async def system_version(self) -> dict[str, Any]:
+        """Version info for container services (read-only — no audit entry).
+
+        The dict is keyed by ``appName`` (e.g. ``"container"`` and
+        ``"container-apiserver"``) from ``system version --format json``.
+        """
+        return await self._backend.system_version()
 
     # ==================================================================
     # Internals

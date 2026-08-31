@@ -13,6 +13,7 @@ import pytest
 
 from daedalus.core.backend import (
     BuildSpec,
+    ClusterCreateSpec,
     MachineCreateSpec,
     MachineInfo,
     MachineSetSettings,
@@ -56,6 +57,97 @@ VOLUME_LIST_JSON = (
     'com.apple.container/volumes/daedalus-probe-v/volume.img"}, '
     '"id": "daedalus-probe-v"}]'
 )
+
+# Literal wire shape for a k8s plugin node + a plain container
+# (SPEC phase 8 §2): cluster node containers carry the plugin label
+# ``com.apple.container.plugin == "k8s"`` and a ``pluginRole``
+# (control-plane | worker) alongside the regular list-item fields.
+# Literal wire shapes from SPEC phase 9 §2 (captured live on container 1.3.1).
+
+# ``system property list`` emits TOML by default (the --format default).
+PROPERTY_LIST_TOML = """[build]
+cpus = 2
+image = "ghcr.io/apple/container-builder-shim/builder:0.13.1"
+memory = "2048mb"
+rosetta = true
+
+[container]
+cpus = 4
+memory = "1gb"
+
+[dns]
+
+[kernel]
+binaryPath = "opt/kata/share/kata-containers/vmlinux-6.18.35-197-debug"
+digest = "sha256:8736c054d9223974735394f822000823baef509e1c33405ec798240fa9b6e4b5"
+url = "https://github.com/kata-containers/kata-containers/releases/download/3.32.0/kata-static-3.32.0-arm64.tar.zst"
+
+[machine]
+cpus = 8
+homeMount = "rw"
+memory = "24gb"
+virtualization = false
+
+[network]
+
+[registry]
+domain = "docker.io"
+
+[vminit]
+image = "ghcr.io/apple/containerization/vminit:0.42.0"
+"""
+
+# ``system version --format json`` — an array of per-service objects.
+SYSTEM_VERSION_JSON = """[{"appName":"container","buildType":"release",
+  "commit":"a9a62e28f6beb88940122a3d7b286f2d5ae8053a","version":"1.3.1"},
+ {"appName":"container-apiserver","buildType":"release",
+  "commit":"a9a62e28f6beb88940122a3d7b286f2d5ae8053a",
+  "version":"container-apiserver version 1.3.1 (build: release, commit: a9a62e2)"}]"""
+
+# ``system df --format json`` — per-category runtime store accounting.
+SYSTEM_DF_JSON = """{
+  "containers" : {
+    "active" : 0,
+    "reclaimable" : 282157056,
+    "sizeInBytes" : 282157056,
+    "total" : 1
+  },
+  "images" : {
+    "active" : 1,
+    "reclaimable" : 14525538304,
+    "sizeInBytes" : 15177728000,
+    "total" : 14
+  },
+  "volumes" : {
+    "active" : 0,
+    "reclaimable" : 0,
+    "sizeInBytes" : 0,
+    "total" : 0
+  }
+}"""
+
+K8S_NODES_JSON = """[{
+  "configuration": {
+    "creationDate": "2026-08-30T10:00:00Z",
+    "id": "cp-abc",
+    "image": {"reference": "docker.io/kindest/node:v1.35.5"},
+    "labels": {"com.apple.container.plugin": "k8s"},
+    "name": "my-cluster"
+  },
+  "id": "cp-abc",
+  "status": {"state": "running"},
+  "pluginRole": "control-plane"
+}, {
+  "configuration": {
+    "creationDate": "2026-08-30T09:00:00Z",
+    "id": "plain-xyz",
+    "image": {"reference": "docker.io/library/alpine:latest"},
+    "labels": {},
+    "name": "plain-xyz"
+  },
+  "id": "plain-xyz",
+  "status": {"state": "running"}
+}]"""
 
 
 # ------------------------------------------------------------------
@@ -707,6 +799,66 @@ class TestVolumeSpecSerialization:
 
 
 # ------------------------------------------------------------------
+# k8s node filtering (SPEC phase 8 §2 — container 1.3.1)
+# ------------------------------------------------------------------
+
+
+class TestK8sNodesParser:
+    def test_filters_to_k8s_plugin_nodes(self) -> None:
+        nodes = OutputParser.k8s_nodes(K8S_NODES_JSON)
+        assert len(nodes) == 1
+        node = nodes[0]
+        # the plain container is dropped, the k8s node survives raw
+        assert node["id"] == "cp-abc"
+        assert node["pluginRole"] == "control-plane"
+        assert node["configuration"]["labels"]["com.apple.container.plugin"] == "k8s"
+        assert node["status"]["state"] == "running"
+
+    def test_empty_array(self) -> None:
+        assert OutputParser.k8s_nodes("[]") == []
+
+    def test_empty_text(self) -> None:
+        assert OutputParser.k8s_nodes("") == []
+
+    def test_missing_labels_filtered_out(self) -> None:
+        data = '[{"id": "x", "configuration": {"labels": {}}}, {"id": "y"}]'
+        assert OutputParser.k8s_nodes(data) == []
+
+    def test_labels_without_plugin_key_filtered_out(self) -> None:
+        data = '[{"id": "x", "configuration": {"labels": {"tier": "prod"}}}]'
+        assert OutputParser.k8s_nodes(data) == []
+
+
+class TestClusterCreateSpecSerialization:
+    def test_to_cli_args_flag_order(self) -> None:
+        spec = ClusterCreateSpec(
+            name="lab",
+            node_image="docker.io/kindest/node:v1.35.5",
+            cpus=4,
+            memory="8G",
+            remove=True,
+            scheme="http",
+        )
+        # name → node-image → scheme → rm → -c → -m; no positional arg
+        assert spec.to_cli_args() == [
+            "--name", "lab",
+            "--node-image", "docker.io/kindest/node:v1.35.5",
+            "--scheme", "http",
+            "--rm",
+            "-c", "4",
+            "-m", "8G",
+        ]
+
+    def test_defaults_emit_name_only(self) -> None:
+        assert ClusterCreateSpec(name="lab").to_cli_args() == ["--name", "lab"]
+
+    def test_max_concurrent_downloads_not_emitted(self) -> None:
+        # registry-level plumbing (CLI default: 3) — deliberately absent
+        args = ClusterCreateSpec(name="lab").to_cli_args()
+        assert "--max-concurrent-downloads" not in args
+
+
+# ------------------------------------------------------------------
 # RunSpec --read-only serialization
 # ------------------------------------------------------------------
 
@@ -937,12 +1089,14 @@ class _RecordingCli:
 
     def __init__(self) -> None:
         self.calls: list[tuple[tuple[str, ...], dict[str, Any]]] = []
+        self.stdout = ""  # scripted stdout for echo/print-back verbs
+        self.exit_code = 0  # scripted exit code (e.g. 64 for usage errors)
 
     async def __call__(
         self, *args: str, **kwargs: Any,
     ) -> tuple[int, str, str]:
         self.calls.append((args, kwargs))
-        return (0, "", "")
+        return (self.exit_code, self.stdout, "")
 
 
 @pytest.fixture
@@ -1153,3 +1307,316 @@ class TestExecWireOrder:
             "--ulimit", "--workdir", "--env",
         ]
         assert list(args[idx + 1:]) == ["uname", "-m"]
+
+
+# ------------------------------------------------------------------
+# k8s plugin wire verbs (SPEC phase 8 §2 — container 1.3.1)
+# ------------------------------------------------------------------
+
+
+class TestK8sWire:
+    async def test_k8s_create(self, rec: _RecordingCli) -> None:
+        backend = _backend({"container_k8s": True})
+        name = await backend.k8s_create(
+            ClusterCreateSpec(name="lab", cpus=2, remove=True),
+        )
+        assert name == "lab"
+        (cmd, _), = rec.calls
+        assert cmd == ("k8s", "create", "--name", "lab", "--rm", "-c", "2")
+
+    async def test_k8s_create_echoes_name(self, rec: _RecordingCli) -> None:
+        backend = _backend({"container_k8s": True})
+        rec.stdout = "lab\n"
+        name = await backend.k8s_create(ClusterCreateSpec(name="lab"))
+        assert name == "lab"
+
+    async def test_k8s_list(self, rec: _RecordingCli) -> None:
+        backend = _backend({"container_k8s": True})
+        assert await backend.k8s_list() == []
+        (cmd, _), = rec.calls
+        # the k8s CLI has no JSON output — the raw container list is read
+        assert cmd == ("list", "--format", "json")
+
+    async def test_k8s_delete(self, rec: _RecordingCli) -> None:
+        await _backend({"container_k8s": True}).k8s_delete("lab")
+        (cmd, _), = rec.calls
+        assert cmd == ("k8s", "delete", "--name", "lab")
+
+    async def test_k8s_start(self, rec: _RecordingCli) -> None:
+        await _backend({"container_k8s": True}).k8s_start("lab")
+        (cmd, _), = rec.calls
+        assert cmd == ("k8s", "start", "--name", "lab")
+
+    async def test_k8s_load_image(self, rec: _RecordingCli) -> None:
+        await _backend({"container_k8s": True}).k8s_load_image(
+            "lab", "demo:latest", platform="linux/arm64",
+        )
+        (cmd, _), = rec.calls
+        assert cmd == (
+            "k8s", "load-image", "--name", "lab",
+            "demo:latest", "--platform", "linux/arm64",
+        )
+
+    async def test_k8s_load_image_no_platform(self, rec: _RecordingCli) -> None:
+        await _backend({"container_k8s": True}).k8s_load_image("lab", "demo:latest")
+        (cmd, _), = rec.calls
+        assert cmd == ("k8s", "load-image", "--name", "lab", "demo:latest")
+
+    async def test_k8s_write_config_to_path(self, rec: _RecordingCli) -> None:
+        backend = _backend({"container_k8s": True})
+        assert await backend.k8s_write_config("lab", kubeconfig="/tmp/kube") == "/tmp/kube"
+        (cmd, _), = rec.calls
+        assert cmd == ("k8s", "write-config", "--name", "lab", "--kubeconfig", "/tmp/kube")
+
+    async def test_k8s_write_config_returns_printed_text(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        calls: list[tuple[str, ...]] = []
+
+        async def fake(*args: str, **kwargs: Any) -> tuple[int, str, str]:
+            calls.append(args)
+            return 0, "apiVersion: v1\nkind: Config\n", ""
+
+        monkeypatch.setattr("daedalus.core.cli_backend._run_cli_impl", fake)
+        backend = _backend({"container_k8s": True})
+        out = await backend.k8s_write_config("lab")
+        assert out == "apiVersion: v1\nkind: Config\n"
+        assert calls == [("k8s", "write-config", "--name", "lab")]
+
+
+class TestK8sGate:
+    """Every k8s verb requires the ``container_k8s`` runtime feature."""
+
+    async def test_create_raises_without_gate(self, rec: _RecordingCli) -> None:
+        backend = _backend({})  # container_k8s absent
+        with pytest.raises(CapabilityError) as excinfo:
+            await backend.k8s_create(ClusterCreateSpec(name="lab"))
+        assert excinfo.value.details["feature"] == "container_k8s"
+        assert rec.calls == []
+
+    async def test_list_raises_without_gate(self, rec: _RecordingCli) -> None:
+        backend = _backend({})
+        with pytest.raises(CapabilityError):
+            await backend.k8s_list()
+
+    async def test_untested_feature_raises(self, rec: _RecordingCli) -> None:
+        backend = _backend({"container_k8s": "untested"})
+        with pytest.raises(CapabilityError):
+            await backend.k8s_write_config("lab")
+
+
+# ------------------------------------------------------------------
+# system property parsing (SPEC phase 9 §2 — captured live on 1.3.1)
+# ------------------------------------------------------------------
+
+
+class TestSystemPropertiesParser:
+    def test_flattens_toml_to_dotted_strings(self) -> None:
+        props = OutputParser.system_properties(PROPERTY_LIST_TOML)
+        assert props["build.cpus"] == "2"
+        assert props["build.image"] == (
+            "ghcr.io/apple/container-builder-shim/builder:0.13.1"
+        )
+        assert props["build.memory"] == "2048mb"
+        assert props["build.rosetta"] == "true"   # bool → "true"
+        assert props["container.cpus"] == "4"
+        assert props["kernel.binaryPath"] == (
+            "opt/kata/share/kata-containers/vmlinux-6.18.35-197-debug"
+        )
+        assert props["kernel.digest"].startswith("sha256:8736c054")
+        assert props["machine.cpus"] == "8"
+        assert props["machine.homeMount"] == "rw"
+        assert props["machine.memory"] == "24gb"
+        assert props["machine.virtualization"] == "false"
+        assert props["registry.domain"] == "docker.io"
+        assert props["vminit.image"] == (
+            "ghcr.io/apple/containerization/vminit:0.42.0"
+        )
+        # empty tables ([dns], [network]) contribute no keys
+        assert "dns." not in "".join(props)
+        assert len(props) == 15
+
+    def test_empty_text(self) -> None:
+        assert OutputParser.system_properties("") == {}
+
+    def test_unparseable_text_returns_empty(self) -> None:
+        assert OutputParser.system_properties("not [valid toml") == {}
+
+
+class TestSystemVersionParser:
+    def test_array_keyed_by_app_name(self) -> None:
+        version = OutputParser.system_version(SYSTEM_VERSION_JSON)
+        assert set(version) == {"container", "container-apiserver"}
+        assert version["container"]["version"] == "1.3.1"
+        assert version["container"]["buildType"] == "release"
+        assert version["container"]["commit"] == (
+            "a9a62e28f6beb88940122a3d7b286f2d5ae8053a"
+        )
+        assert version["container-apiserver"]["version"].startswith(
+            "container-apiserver version 1.3.1"
+        )
+
+    def test_empty_array(self) -> None:
+        assert OutputParser.system_version("[]") == {}
+
+    def test_empty_text(self) -> None:
+        assert OutputParser.system_version("") == {}
+
+    def test_single_object_accepted(self) -> None:
+        single = '{"appName": "container", "version": "1.3.1"}'
+        assert OutputParser.system_version(single)["container"]["version"] == "1.3.1"
+
+    def test_entries_without_app_name_dropped(self) -> None:
+        data = '[{"appName": "container", "version": "1.3.1"}, {"version": "2.0"}]'
+        assert set(OutputParser.system_version(data)) == {"container"}
+
+
+class TestSystemDfJsonParser:
+    def test_live_shape_maps_used_from_size_in_bytes(self) -> None:
+        df = OutputParser.system_df_json(SYSTEM_DF_JSON)
+        # 282157056 (containers) + 15177728000 (images) + 0 (volumes)
+        assert df["used"] == 15459885056
+        assert df["total"] == df["used"]  # no capacity figure in the JSON
+        assert df["containers"] == {
+            "active": 0, "reclaimable": 282157056,
+            "sizeInBytes": 282157056, "total": 1,
+        }
+        assert df["images"]["sizeInBytes"] == 15177728000
+        assert df["images"]["active"] == 1
+        assert df["volumes"]["total"] == 0
+
+    def test_empty_text(self) -> None:
+        assert OutputParser.system_df_json("") == {}
+
+    def test_non_json_returns_empty(self) -> None:
+        assert OutputParser.system_df_json("CONTAINER ID  IMAGE") == {}
+
+    def test_missing_categories_tolerated(self) -> None:
+        partial = '{"images": {"sizeInBytes": 100}}'
+        df = OutputParser.system_df_json(partial)
+        assert df["used"] == 100
+        assert df["containers"] == {}
+        assert df["volumes"] == {}
+
+
+# ------------------------------------------------------------------
+# system property / version / df wire verbs (no daemon — rec fakes CLI)
+# ------------------------------------------------------------------
+
+
+class TestSystemPropertyWire:
+    async def test_list_command_and_parse(self, rec: _RecordingCli) -> None:
+        backend = _backend({"system_properties": True})
+        rec.stdout = PROPERTY_LIST_TOML
+        props = await backend.system_property_list()
+        assert props["build.cpus"] == "2"
+        (cmd, _), = rec.calls
+        # default --format (toml) — the widest-compatible wire
+        assert cmd == ("system", "property", "list")
+
+    async def test_list_requires_gate(self, rec: _RecordingCli) -> None:
+        backend = _backend({})
+        with pytest.raises(CapabilityError) as excinfo:
+            await backend.system_property_list()
+        assert excinfo.value.details["feature"] == "system_properties"
+        assert rec.calls == []
+
+    async def test_get_requires_gate(self, rec: _RecordingCli) -> None:
+        backend = _backend({})
+        with pytest.raises(CapabilityError):
+            await backend.system_property_get("build.cpus")
+
+    async def test_set_requires_gate(self, rec: _RecordingCli) -> None:
+        backend = _backend({})
+        with pytest.raises(CapabilityError):
+            await backend.system_property_set("build.cpus", "4")
+
+    async def test_get_unavailable_on_131_host(self, rec: _RecordingCli) -> None:
+        """1.3.1 has no property get — the CLI answers with a usage error (exit 64)."""
+        backend = _backend({"system_properties": True})
+        rec.exit_code = 64
+        with pytest.raises(CapabilityError) as excinfo:
+            await backend.system_property_get("build.cpus")
+        assert excinfo.value.details["feature"] == "system_property_get"
+        assert excinfo.value.details["container_version"] == "1.3.1"
+        (cmd, _), = rec.calls
+        assert cmd == ("system", "property", "get", "build.cpus")
+
+    async def test_set_unavailable_on_131_host(self, rec: _RecordingCli) -> None:
+        backend = _backend({"system_properties": True})
+        rec.exit_code = 64
+        with pytest.raises(CapabilityError) as excinfo:
+            await backend.system_property_set("build.cpus", "4")
+        assert excinfo.value.details["feature"] == "system_property_set"
+        (cmd, _), = rec.calls
+        assert cmd == ("system", "property", "set", "build.cpus", "4")
+
+    async def test_get_returns_value_when_host_supports_it(
+        self, rec: _RecordingCli,
+    ) -> None:
+        backend = _backend({"system_properties": True})
+        rec.stdout = "2\n"
+        assert await backend.system_property_get("build.cpus") == "2"
+        (cmd, _), = rec.calls
+        assert cmd == ("system", "property", "get", "build.cpus")
+
+
+class TestSystemVersionWire:
+    async def test_command_and_parse(self, rec: _RecordingCli) -> None:
+        backend = _backend()
+        rec.stdout = SYSTEM_VERSION_JSON
+        result = await backend.system_version()
+        assert result["container"]["version"] == "1.3.1"
+        (cmd, _), = rec.calls
+        assert cmd == ("system", "version", "--format", "json")
+
+
+class TestSystemDfWire:
+    async def test_json_path_merges_host_volume_fields(
+        self, rec: _RecordingCli, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        backend = _backend()
+        rec.stdout = SYSTEM_DF_JSON
+
+        async def fake_os() -> dict[str, Any]:
+            return {
+                "total": 1_000_000_000_000, "used": 500,
+                "free": 999_999_999_500, "path": "/tmp/container",
+            }
+
+        monkeypatch.setattr(backend, "_os_disk_usage", fake_os)
+        result = await backend.system_df()
+        (cmd, _), = rec.calls
+        assert cmd == ("system", "df", "--format", "json")
+        # runtime store usage from the JSON…
+        assert result["used"] == 15459885056
+        assert result["store_bytes"] == 15459885056
+        assert result["source"] == "container system df --format json"
+        # …host-volume total/free (the df JSON has no free-space figure)…
+        assert result["total"] == 1_000_000_000_000
+        assert result["free"] == 999_999_999_500
+        assert result["path"] == "/tmp/container"
+        # …and the raw per-category breakdown preserved.
+        assert result["images"]["sizeInBytes"] == 15177728000
+        assert result["containers"]["active"] == 0
+
+    async def test_no_json_falls_back_to_os_measurement(
+        self, rec: _RecordingCli, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        backend = _backend()
+        rec.stdout = ""  # host df emits no JSON
+
+        async def fake_os() -> dict[str, Any]:
+            return {
+                "total": 1_000_000_000_000, "used": 500,
+                "free": 999_999_999_500, "path": "/tmp/container",
+                "store_bytes": 42,
+            }
+
+        monkeypatch.setattr(backend, "_os_disk_usage", fake_os)
+        result = await backend.system_df()
+        assert result == {
+            "total": 1_000_000_000_000, "used": 500,
+            "free": 999_999_999_500, "path": "/tmp/container",
+            "store_bytes": 42,
+        }

@@ -175,6 +175,15 @@ class PolicyEngine:
             )
         return PolicyResult(Decision.ALLOW)
 
+    def check_cluster_delete(self, *, confirm: bool = False) -> PolicyResult:
+        """Cluster deletion is CONFIRM-gated unless confirm=True. Mirror check_network_delete."""
+        if self.config.require_confirm_destroy and not confirm:
+            return PolicyResult(
+                Decision.CONFIRM,
+                "Cluster delete requires confirm=True",
+            )
+        return PolicyResult(Decision.ALLOW)
+
     def check_network_expose(self, *, confirm: bool = False) -> PolicyResult:
         if self.config.require_confirm_network_expose and not confirm:
             return PolicyResult(

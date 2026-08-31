@@ -677,6 +677,44 @@ class VolumeSpec:
         return args
 
 
+@dataclass
+class ClusterCreateSpec:
+    """Spec for ``container k8s create`` (container 1.3.1 k8s plugin, SPEC §2).
+
+    ``--max-concurrent-downloads`` is registry-level plumbing, not
+    cluster config, so it is intentionally omitted (the CLI default of 3
+    applies).  The CLI takes **no positional argument** — the cluster
+    name is set via ``--name`` (default ``k8s-dev`` when omitted).
+    """
+
+    name: str
+    node_image: str | None = None
+    cpus: int | None = None
+    memory: str | None = None
+    remove: bool = False
+    scheme: str | None = None
+
+    def to_cli_args(self) -> list[str]:
+        """Serialize into ``container k8s create`` CLI arguments.
+
+        Flag order mirrors the verified 1.3.1 surface: name, node image,
+        registry scheme, remove-on-stop, then the resource short flags.
+        """
+        flags: list[str] = []
+        flags += ["--name", self.name]
+        if self.node_image:
+            flags += ["--node-image", self.node_image]
+        if self.scheme:
+            flags += ["--scheme", self.scheme]
+        if self.remove:
+            flags.append("--rm")
+        if self.cpus is not None:
+            flags += ["-c", str(self.cpus)]
+        if self.memory:
+            flags += ["-m", self.memory]
+        return flags
+
+
 # ==========================================================================
 # Abstract backend
 # ==========================================================================
@@ -967,12 +1005,43 @@ class Backend(ABC):
         ...
 
     @abstractmethod
+    async def system_property_list(self) -> dict[str, str]:
+        """List system property values (``container system property list``).
+
+        The CLI emits TOML; the parsed result is a flat dotted-key dict
+        (``{"build.cpus": "2", ...}``) of display-ready strings.
+        """
+        ...
+
+    @abstractmethod
+    async def system_property_get(self, key: str) -> str:
+        """Read a single system property value (``system property get <key>``)."""
+        ...
+
+    @abstractmethod
+    async def system_property_set(self, key: str, value: str) -> None:
+        """Set a system property value (``system property set <key> <value>``)."""
+        ...
+
+    @abstractmethod
+    async def system_version(self) -> dict[str, Any]:
+        """Version info for container services (``system version --format json``).
+
+        The wire is a JSON array of ``{appName, buildType, commit,
+        version}`` objects; the parsed result is keyed by ``appName``.
+        """
+        ...
+
+    @abstractmethod
     async def system_df(self) -> dict[str, Any]:
         """Disk usage info.
 
-        NOTE: ``container system df`` is available in container 1.2.2;
-        the default implementation here still measures disk at the OS
-        level (the CliBackend's host-side check feeds policy budgets).
+        Preferred wire: ``container system df --format json`` (verified on
+        1.3.1) — the runtime's own store accounting.  The df JSON carries
+        no free-space figure, so implementations must still source
+        ``free``/``total`` host-side; the OS-level measurement remains the
+        fallback for hosts whose df does not emit JSON (the CliBackend's
+        host-side check feeds policy budgets).
         """
         return {}
 
@@ -1114,6 +1183,52 @@ class Backend(ABC):
     @abstractmethod
     async def volume_prune(self) -> list[str]:
         """Remove unused volumes; returns the pruned volume names."""
+        ...
+
+    # -- k8s plugin (container 1.3.1) --------------------------------------
+
+    @abstractmethod
+    async def k8s_create(self, spec: ClusterCreateSpec) -> str:
+        """Create and start a local Kubernetes cluster; returns the name."""
+        ...
+
+    @abstractmethod
+    async def k8s_list(self) -> list[dict[str, Any]]:
+        """List raw k8s node containers (``container list --format json``).
+
+        ``container k8s list`` renders a table only, so the raw container
+        list is filtered client-side by the plugin label — the same
+        source Orchard's ClusterService groups from.
+        """
+        ...
+
+    @abstractmethod
+    async def k8s_delete(self, name: str) -> None:
+        """Delete a Kubernetes cluster (destructive)."""
+        ...
+
+    @abstractmethod
+    async def k8s_start(self, name: str) -> None:
+        """Start a stopped Kubernetes cluster."""
+        ...
+
+    @abstractmethod
+    async def k8s_load_image(
+        self, name: str, image: str, *, platform: str | None = None,
+    ) -> None:
+        """Load a container image into a cluster's containerd."""
+        ...
+
+    @abstractmethod
+    async def k8s_write_config(
+        self, name: str, *, kubeconfig: str | None = None,
+    ) -> str:
+        """Write the cluster context to a kubeconfig.
+
+        With ``kubeconfig`` set, the file is written/merged and its path
+        returned; without, the CLI prints the config text which is
+        returned instead.
+        """
         ...
 
     # -- escape hatch ------------------------------------------------------

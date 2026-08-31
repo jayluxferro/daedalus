@@ -16,6 +16,7 @@ from rich.table import Table
 
 from daedalus.core.audit import ActorKind, AuditLog
 from daedalus.core.backend import (
+    ClusterCreateSpec,
     MachineCreateSpec,
     MachineSetSettings,
     NetworkInfo,
@@ -24,6 +25,7 @@ from daedalus.core.backend import (
 )
 from daedalus.core.capabilities import CapabilityManifest, ensure_daemon, probe
 from daedalus.core.cli_backend import CliBackend
+from daedalus.core.clusters import Clusters
 from daedalus.core.exceptions import DetonationError, ValidationError
 from daedalus.core.forge import Forge
 from daedalus.core.icarus import ExecOptions, Icarus
@@ -46,6 +48,7 @@ console = Console()
 # Lazy-init globals — typed loosely to avoid import-time I/O
 _caps: CapabilityManifest | None = None
 _backend: CliBackend | None = None
+_clusters: Clusters | None = None
 _forge: Forge | None = None
 _icarus: Icarus | None = None
 _machina: Machina | None = None
@@ -57,7 +60,7 @@ _volumes: Volumes | None = None
 
 
 def _bootstrap() -> None:
-    global _caps, _backend, _forge, _icarus, _machina, _mint
+    global _caps, _backend, _clusters, _forge, _icarus, _machina, _mint
     global _profiles, _store, _talos, _volumes
     if _caps is not None:
         return
@@ -81,6 +84,7 @@ def _bootstrap() -> None:
     policy.config.on_decision = _policy_audit
 
     _backend = backend
+    _clusters = Clusters(backend, _caps, policy=policy, audit=audit)
     _store = store
     _forge = Forge(backend, _caps, policy=policy, audit=audit, store=store)
     _icarus = Icarus(
@@ -101,6 +105,11 @@ def _b() -> CliBackend:
 def _c() -> CapabilityManifest:
     assert _caps is not None
     return _caps
+
+
+def _cl() -> Clusters:
+    assert _clusters is not None
+    return _clusters
 
 
 def _f() -> Forge:
@@ -1297,6 +1306,152 @@ def kernel_status() -> None:
 
 
 # ==================================================================
+# K8s clusters
+# ==================================================================
+
+
+k8s_app = typer.Typer(
+    name="k8s",
+    help="Manage local Kubernetes clusters.",
+    no_args_is_help=True,
+)
+
+
+@k8s_app.command("create")
+def k8s_create(
+    name: Annotated[str, typer.Option("--name", help="Cluster name (required)")],
+    node_image: Annotated[str | None, typer.Option("--node-image")] = None,
+    cpus: Annotated[int | None, typer.Option("--cpus")] = None,
+    memory: Annotated[str | None, typer.Option("--memory")] = None,
+    remove: Annotated[
+        bool,
+        typer.Option("--rm", help="Remove the cluster when its control-plane stops"),
+    ] = False,
+) -> None:
+    """Create and start a local Kubernetes cluster."""
+    _bootstrap()
+    spec = ClusterCreateSpec(
+        name=name,
+        node_image=node_image,
+        cpus=cpus,
+        memory=memory,
+        remove=remove,
+    )
+
+    async def _go() -> None:
+        created = await _cl().create(spec)
+        console.print(f"[green]✓[/] Created cluster [bold]{created}[/]")
+    asyncio.run(_go())
+
+
+@k8s_app.command("list")
+def k8s_list(
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """List local Kubernetes clusters, grouped by cluster."""
+    _bootstrap()
+
+    async def _go() -> None:
+        clusters = await _cl().list()
+        if json_output:
+            console.print(json.dumps([c.to_dict() for c in clusters], indent=2))
+            return
+        if not clusters:
+            console.print("[dim]No clusters.[/]")
+            return
+        table = Table(title="K8s Clusters")
+        table.add_column("Name", style="cyan")
+        table.add_column("Status")
+        table.add_column("Control-plane")
+        table.add_column("Workers")
+        table.add_column("Addresses")
+        for cluster in clusters:
+            status_style = "green" if cluster.status == "running" else "dim"
+            cp = cluster.control_plane
+            cp_label = cp.id[:12] if cp is not None else "-"
+            addresses = ", ".join(
+                node.address for node in cluster.nodes if node.address
+            )
+            table.add_row(
+                cluster.name,
+                f"[{status_style}]{cluster.status}[/]",
+                cp_label,
+                str(len(cluster.workers)),
+                addresses or "-",
+            )
+        console.print(table)
+    asyncio.run(_go())
+
+
+@k8s_app.command("start")
+def k8s_start(name: str) -> None:
+    """Start a stopped Kubernetes cluster."""
+    _bootstrap()
+
+    async def _go() -> None:
+        await _cl().start(name)
+        console.print(f"[green]✓[/] Started cluster [bold]{name}[/]")
+    asyncio.run(_go())
+
+
+@k8s_app.command("load-image")
+def k8s_load_image(
+    name: str,
+    image: str,
+    platform: Annotated[str | None, typer.Option("--platform")] = None,
+) -> None:
+    """Load a container image into a cluster's containerd."""
+    _bootstrap()
+
+    async def _go() -> None:
+        await _cl().load_image(name, image, platform=platform)
+        console.print(
+            f"[green]✓[/] Loaded [cyan]{image}[/] into cluster [bold]{name}[/]",
+        )
+    asyncio.run(_go())
+
+
+@k8s_app.command("write-config")
+def k8s_write_config(
+    name: str,
+    kubeconfig: Annotated[
+        str | None,
+        typer.Option(
+            "--kubeconfig",
+            help="Target kubeconfig path (default: print the config text)",
+        ),
+    ] = None,
+) -> None:
+    """Write a cluster's kubeconfig, or print the config text."""
+    _bootstrap()
+
+    async def _go() -> None:
+        result = await _cl().write_config(name, kubeconfig=kubeconfig)
+        if kubeconfig:
+            console.print(f"[green]✓[/] Wrote kubeconfig → [bold]{result}[/]")
+        else:
+            console.print(result.rstrip("\n"))
+    asyncio.run(_go())
+
+
+@k8s_app.command("delete")
+def k8s_delete(
+    name: str,
+    confirm: Annotated[bool, typer.Option("--confirm")] = False,
+) -> None:
+    """Delete a Kubernetes cluster. Requires --confirm."""
+    _bootstrap()
+
+    async def _go() -> None:
+        if not confirm:
+            console.print("[yellow]requires --confirm[/]")
+            raise typer.Exit(code=1)
+        await _cl().delete(name, confirm=True)
+        console.print(f"[red]✗[/] Deleted cluster [bold]{name}[/]")
+    asyncio.run(_go())
+
+
+# ==================================================================
 # Images
 # ==================================================================
 
@@ -1801,6 +1956,7 @@ app.add_typer(network_app, name="network")
 app.add_typer(machine_app, name="machine")
 app.add_typer(volume_app, name="volume")
 app.add_typer(kernel_app, name="kernel")
+app.add_typer(k8s_app, name="k8s")
 
 
 if __name__ == "__main__":

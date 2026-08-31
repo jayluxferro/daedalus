@@ -56,6 +56,14 @@ Endpoints::
     DELETE /volumes/{name}
     POST /volumes/prune
 
+    # Clusters (container 1.3.1 k8s plugin)
+    GET  /clusters
+    POST /clusters
+    POST /clusters/{name}/start
+    POST /clusters/{name}/load-image
+    GET  /clusters/{name}/kubeconfig
+    DELETE /clusters/{name}
+
     # Profiles
     GET  /profiles
 
@@ -98,6 +106,7 @@ from pydantic import BaseModel
 from daedalus.core.audit import ActorKind, AuditLog
 from daedalus.core.backend import (
     BuildSpec,
+    ClusterCreateSpec,
     MachineCreateSpec,
     MachineSetSettings,
     NetworkSpec,
@@ -106,6 +115,7 @@ from daedalus.core.backend import (
 )
 from daedalus.core.capabilities import ensure_daemon, probe
 from daedalus.core.cli_backend import CliBackend
+from daedalus.core.clusters import Clusters
 from daedalus.core.exceptions import DaedalusError
 from daedalus.core.forge import Forge
 from daedalus.core.icarus import ExecOptions, Icarus
@@ -322,6 +332,27 @@ class VolumeCreateRequest(BaseModel):
     options: dict[str, str] = {}
 
 
+class ClusterCreateRequest(BaseModel):
+    """Body for ``POST /clusters`` (container 1.3.1 ``k8s create``).
+
+    ``scheme`` stays CLI-only for now (registry plumbing, like
+    ``--max-concurrent-downloads``); the engine defaults apply.
+    """
+
+    name: str
+    node_image: str | None = None
+    cpus: int | None = None
+    memory: str | None = None
+    remove: bool = False  # --rm: remove node containers when the cluster stops
+
+
+class ClusterLoadImageRequest(BaseModel):
+    """Body for ``POST /clusters/{name}/load-image``."""
+
+    image: str
+    platform: str | None = None
+
+
 class NetworkCreateRequest(BaseModel):
     name: str
     subnet: str | None = None
@@ -397,6 +428,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         "talos": Talos(backend, caps, policy=policy, audit=audit),
         "machina": Machina(backend, caps, policy=policy, audit=audit),
         "volumes": Volumes(backend, caps, policy=policy, audit=audit),
+        "clusters": Clusters(backend, caps, policy=policy, audit=audit),
         "profiles": ProfileRegistry(),
         "audit": audit,
         "store": store,
@@ -1136,6 +1168,80 @@ async def volume_prune(req: PruneRequest) -> dict[str, Any]:
     s = _get_state()
     removed = await s["volumes"].prune(confirm=True)
     return {"removed": removed}
+
+
+# ==========================================================================
+# Clusters (container 1.3.1 k8s plugin — local Kubernetes dev clusters)
+# ==========================================================================
+
+
+@app.get("/clusters")
+async def cluster_list() -> list[dict[str, Any]]:
+    """List local Kubernetes clusters, grouped per Orchard (SPEC phase 8).
+
+    Each cluster dict is ``K8sCluster.to_dict()``: name/id, status
+    (running|stopped|partial|unknown), control-plane node and workers.
+    """
+    s = _get_state()
+    clusters = await s["clusters"].list()
+    return [c.to_dict() for c in clusters]
+
+
+@app.post("/clusters")
+async def cluster_create(req: ClusterCreateRequest) -> dict[str, Any]:
+    """Create and start a local Kubernetes cluster; returns its name."""
+    s = _get_state()
+    spec = ClusterCreateSpec(
+        name=req.name,
+        node_image=req.node_image,
+        cpus=req.cpus,
+        memory=req.memory,
+        remove=req.remove,
+    )
+    name = await s["clusters"].create(spec)
+    return {"name": name}
+
+
+@app.post("/clusters/{name}/start")
+async def cluster_start(name: str) -> dict[str, Any]:
+    """Start a stopped Kubernetes cluster."""
+    s = _get_state()
+    await s["clusters"].start(name)
+    return {"ok": True}
+
+
+@app.post("/clusters/{name}/load-image")
+async def cluster_load_image(
+    name: str, req: ClusterLoadImageRequest,
+) -> dict[str, Any]:
+    """Load a container image into a cluster's containerd."""
+    s = _get_state()
+    await s["clusters"].load_image(name, req.image, platform=req.platform)
+    return {"ok": True}
+
+
+@app.get("/clusters/{name}/kubeconfig")
+async def cluster_kubeconfig(name: str) -> dict[str, str]:
+    """Return the cluster's kubeconfig text.
+
+    No path is given, so the CLI prints the config text and the engine
+    returns it verbatim (``k8s_write_config`` without ``--kubeconfig``).
+    """
+    s = _get_state()
+    text = await s["clusters"].write_config(name)
+    return {"kubeconfig": text}
+
+
+@app.delete("/clusters/{name}")
+async def cluster_delete(
+    name: str, confirm: bool = Query(False),
+) -> dict[str, Any]:
+    """Delete a Kubernetes cluster (destructive — confirm required)."""
+    if not confirm:
+        raise HTTPException(status_code=400, detail="confirm=true required for deletion")
+    s = _get_state()
+    await s["clusters"].delete(name, confirm=True)
+    return {"ok": True}
 
 
 # ==========================================================================
