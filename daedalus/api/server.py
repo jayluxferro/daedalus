@@ -79,6 +79,10 @@ Endpoints::
 
     # System
     GET  /system/status
+    GET  /system/version
+    GET  /system/properties
+    GET  /system/properties/{key}
+    PUT  /system/properties/{key}
     GET  /system/audit
     GET  /system/events               (SSE)
     POST /system/kernel/set
@@ -201,6 +205,10 @@ class SystemKernelSetRequest(BaseModel):
     tar: str | None = None
     arch: str = "arm64"
     recommended: bool = False
+
+
+class SystemPropertySetRequest(BaseModel):
+    value: str
 
 
 class MachineCreateRequest(BaseModel):
@@ -1249,6 +1257,30 @@ async def cluster_delete(
 # ==========================================================================
 
 
+@app.get("/images/search")
+async def search_images(
+    q: str = Query("", min_length=2),
+    limit: int = Query(25, le=50),
+) -> list[dict[str, Any]]:
+    """Search Docker Hub (server-side — Hub sends no CORS headers, so the
+    UI cannot fetch it directly).  Degrades to an empty list on failure."""
+    import urllib.request
+
+    url = f"https://hub.docker.com/v2/search/repositories/?query={q}&page_size={limit}"
+    try:
+        with urllib.request.urlopen(url, timeout=10) as resp:
+            data = json.loads(resp.read().decode())
+        return [
+            {
+                "repo_name": r.get("repo_name", ""),
+                "short_description": r.get("short_description", ""),
+                "star_count": r.get("star_count", 0),
+            }
+            for r in data.get("results", [])
+        ]
+    except Exception:
+        return []
+
 @app.get("/images")
 async def image_list() -> list[dict[str, Any]]:
     s = _get_state()
@@ -1654,6 +1686,60 @@ async def system_status() -> dict[str, Any]:
         "disk_usage": status.disk_usage,
         "capabilities": status.capabilities,
     }
+
+
+@app.get("/system/version")
+async def system_version() -> dict[str, Any]:
+    """Return container service version info, keyed by appName.
+
+    Mirrors ``container system version --format json``: on 1.3.1 the
+    dict has ``container`` and ``container-apiserver`` entries, each
+    with version/buildType/commit.
+    """
+    s = _get_state()
+    return await s["forge"].system_version()
+
+
+@app.get("/system/properties")
+async def system_properties() -> dict[str, dict[str, str]]:
+    """List system property values as a flat dotted-key dict.
+
+    NOTE: container 1.3.1 exposes only ``system property list`` — the
+    get/set endpoints below return the runtime's honest
+    CapabilityError (400) on this host.
+    """
+    s = _get_state()
+    props = await s["forge"].system_property_list()
+    return {"properties": props}
+
+
+@app.get("/system/properties/{key}")
+async def system_property_get(key: str) -> dict[str, str]:
+    """Read a single system property value.
+
+    NOTE: container 1.3.1 exposes only ``system property list`` — this
+    endpoint returns the runtime's honest CapabilityError (400) on this
+    host.
+    """
+    s = _get_state()
+    value = await s["forge"].system_property_get(key)
+    return {"key": key, "value": value}
+
+
+@app.put("/system/properties/{key}")
+async def system_property_set(
+    key: str,
+    req: SystemPropertySetRequest,
+) -> dict[str, Any]:
+    """Set a system property value (audited host-configuration change).
+
+    Body: ``{"value": "..."}``.  NOTE: container 1.3.1 exposes only
+    ``system property list`` — this endpoint returns the runtime's
+    honest CapabilityError (400) on this host.
+    """
+    s = _get_state()
+    await s["forge"].system_property_set(key, req.value)
+    return {"status": "set", "key": key, "value": req.value}
 
 
 @app.get("/system/audit")

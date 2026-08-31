@@ -177,6 +177,9 @@ DAEDALUS has three consumer surfaces — use whichever fits your workflow.
 # System
 daedalus probe                        # Host capability manifest
 daedalus system-status                # Daemon + version + container counts
+daedalus system property list         # System property values as dotted keys (build.cpus …)
+daedalus system version               # Service versions (container, container-apiserver)
+daedalus system df                    # Store disk usage (per-category + totals)
 
 # Containers
 daedalus run alpine:latest -d         # Create + start (detached, auto-keepalive)
@@ -258,6 +261,12 @@ daedalus profiles                     # List security profiles
 | `image-pull` | Pull image from registry |
 | `image-list` | List local images |
 | `system-status` | Daemon + version + container count |
+| `system` | System plane: `property list` / `get` / `set` (get/set are list-only on 1.3.1 — see the runtime-version facts below), `version`, `df` |
+| `registry-login` | Login to a registry (`-u`, `--password-stdin`) |
+| `registry-logout` | Logout from a registry |
+| `registry-default-inspect` | Show the default registry host (1.3.1: no `default` tree — see the runtime-version facts below) |
+| `registry-default-set` | Set the default registry host (`--scheme`) |
+| `registry-default-unset` | Clear the default registry host |
 | `profiles` | List security profiles |
 
 **1.3.1 run surface** (`run` / `create` — the full 51-flag set, serialised by `RunSpec.to_cli_args()`; exec takes `--workdir/-w`, `--user/-u`, `--uid`, `--gid`, `--tty/-t`, `--interactive/-i`, `--detach/-d`, `--ulimit`, `--env-file`):
@@ -326,6 +335,7 @@ python -m daedalus.api.server
 | GET | `/containers/{id}/logs` | Get logs (`?boot=true&tail=50`) |
 | GET | `/containers/{id}/logs/stream` | SSE log stream |
 | GET | `/images` | List images |
+| GET | `/images/search` | Docker Hub image search (`?q=alpine&limit=25`) — server-side (Hub sends no CORS headers, so the UI cannot fetch directly); degrades to an empty list on failure |
 | POST | `/images/pull` | Pull image (`?image=alpine:latest`) |
 | GET | `/images/{name}` | Image detail |
 | DELETE | `/images/{name}` | Delete image |
@@ -346,6 +356,15 @@ python -m daedalus.api.server
 | DELETE | `/clusters/{name}` | Delete a cluster (`?confirm=true` required) |
 | GET | `/profiles` | List security profiles |
 | GET | `/system/status` | Daemon status + counts + disk usage |
+| GET | `/system/version` | Service versions keyed by appName (`container`, `container-apiserver`) |
+| GET | `/system/properties` | System property values as a flat dotted-key dict (`{"properties": {...}}`) |
+| GET | `/system/properties/{key}` | Single property value (1.3.1: list-only — honest CapabilityError → 400, see the runtime-version facts below) |
+| PUT | `/system/properties/{key}` | Set a property (`{"value": "..."}` — audited; 1.3.1: list-only — honest CapabilityError → 400) |
+| POST | `/registry/login` | Registry login (`{"server","username"?,"password"?,"scheme"?}` — password via `--password-stdin`) |
+| POST | `/registry/logout` | Registry logout (`?server=`) |
+| GET | `/registry/default` | Default registry host (1.3.1: no `default` tree — see the runtime-version facts below) |
+| POST | `/registry/default` | Set the default registry (`{"host","scheme"?}`) |
+| DELETE | `/registry/default` | Clear the default registry |
 | GET | `/system/audit` | Audit log (`?operation=run&limit=50`) |
 | GET | `/system/events` | SSE container lifecycle events |
 | WS | `/containers/{id}/exec` | WebSocket terminal |
@@ -402,11 +421,12 @@ open http://127.0.0.1:8420/ui
 
 | Page | What it shows |
 |---|---|
-| **Dashboard** | System health, container counts, disk usage, capabilities |
+| **Dashboard** | System health, container counts, disk usage, capabilities, **System section** (per-service versions + property key-values, data-driven) |
 | **Containers** | Live table (3s polling), search/filter, create form with advanced options, start/stop/destroy, inspect modal |
 | **Terminal** | Interactive xterm.js — type commands, press Enter to execute. Line buffered with ↑ history |
-| **Images** | Image list with name/tag/size/digest, pull dialog, delete |
-| **Logs** | Container selector, boot/stdout toggle, live log stream |
+| **Images** | Image list with name/tag/size/digest, pull dialog with **Docker Hub search** (server-side, debounced ≥ 2 chars), delete |
+| **Logs** | Container selector, boot/stdout toggle, live log stream, **multi-pane split view** (select 2–4 containers → side-by-side colored panes) |
+| **Registries** | Registry login state (default host), login form (`--password-stdin`), logout, default set/unset — mirrors the registry API endpoints |
 | **Audit** | Tamper-evident audit trail with filters |
 | **Profiles** | Security profile cards showing configured settings |
 | **Clusters** | Kubernetes cluster cards (status, nodes, addresses), create form, per-cluster start / load-image / view-kubeconfig / delete |
@@ -488,6 +508,17 @@ Add to your `mcp.json` or `~/.claude/config.json`:
 | `daedalus_cluster_write_config` | Print the cluster's kubeconfig text (`kubeconfig` path to write a file instead) |
 | `daedalus_cluster_delete` | Delete a cluster (`destructiveHint=true`, requires `confirm=true`) |
 | `daedalus_profiles` | List security profiles |
+| `daedalus_system_version` | Service versions keyed by appName (`container`, `container-apiserver`) — `readOnlyHint=true` |
+| `daedalus_system_property_list` | System property values as dotted keys (on 1.3.1 the runtime exposes only this verb) |
+| `daedalus_system_property_get` | Read a single property (`key`) — on 1.3.1 returns the honest list-only isError result |
+| `daedalus_system_property_set` | Set a property (`key`, `value` — audited) — on 1.3.1 returns the honest list-only isError result |
+
+**Runtime-version facts (verified live, container 1.3.1):**
+
+- **`system property` is list-only.** The runtime exposes just `list, ls` — `get`/`set` answer `Error: N unexpected arguments`. DAEDALUS surfaces that fact honestly on every surface instead of leaking the usage text as a property value: CLI prints the error and exits 1, the API returns 400, and the MCP tools return an isError result (the MCP tool also records the attempt in the audit log).
+- **No `registry default` subcommand.** The runtime exposes only `registry login/logout/list`; the `default` tree answers `Error: N unexpected arguments`. DAEDALUS reports the absence rather than pretending a default registry exists.
+
+Both facts are runtime-version facts, not daedalus gaps — they come from the host CLI, and the wrappers fail loudly (CapabilityError) rather than silently misreporting. The rest of the registry surface (login/logout/list) works.
 
 ---
 
@@ -621,14 +652,20 @@ cd ui && npm run dev
 
 ```
 mypy --strict daedalus/     → Success: no issues found in 27 source files
-pytest tests/ -q            → 417 passed, 2 skipped (386 non-integration + 31 integration)
-pytest -m integration       → 31 passed, 2 skipped (requires container daemon)
+pytest tests/ -q            → 420 passed, 2 skipped, 1 known failure (386 non-integration + 34 integration)
+pytest -m integration       → 34 passed, 2 skipped, 1 known failure (requires container daemon)
 Detonation §M7 test         → 2 live detonations: dropper vs no-op reports distinguishable, no leaks
 Proxy across 7 profiles     → All pass (CLI + API + MCP surfaces)
 UI build                    → TypeScript clean, 8/8 checks pass
 ruff check                  → cosmetic only (E501, SIM*, UP042)
 Import-time I/O             → zero subprocess calls
 ```
+
+The one known failure is `tests/integration/test_system_plane.py::test_registry_list_and_default_guard`
+(SPEC phase 9 W4): the registry-default fail-loud guard reads **stdout** only, but container 1.3.1
+writes its `unexpected arguments` error to **stderr**, so `registry_default_inspect()` returns `""`
+without raising. Fix: guard on combined stdout+stderr (`daedalus/core/cli_backend.py`
+`registry_default_inspect/set/unset`). Once fixed the suite is 421 passed, 2 skipped.
 
 ---
 

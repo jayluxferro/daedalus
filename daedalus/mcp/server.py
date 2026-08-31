@@ -214,6 +214,9 @@ Core capabilities:
 - Manage named volumes (persistent disk images) via `daedalus_volume_*`
 - Manage local Kubernetes clusters via `daedalus_cluster_*`
 - Set the default container kernel via `daedalus_kernel_set`
+- Inspect the runtime's system properties and service versions via
+  `daedalus_system_property_*` / `daedalus_system_version` (on 1.3.1 only
+  `daedalus_system_property_list` works; get/set report the runtime's limitation)
 
 Multi-arch guests: pass `arch="x86_64"` to `daedalus_run`/`daedalus_create`
 to run amd64 guests on Apple silicon (optionally `rosetta=True` for the
@@ -1216,6 +1219,111 @@ async def daedalus_system_kernel_set(
         return _ok({"set": True, "arch": arch})
     except DaedalusError as e:
         return _err(e)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Container system version",
+        readOnlyHint=True,
+        idempotentHint=True,
+    ),
+)
+async def daedalus_system_version(ctx: Context) -> str:
+    """Return container service version info.
+
+    JSON keyed by appName (e.g. "container", "container-apiserver"),
+    each with version, buildType, and commit — mirrors
+    `container system version --format json`.
+    """
+    dc = _get_ctx(ctx)
+    try:
+        versions = await dc.forge.system_version()
+        return json.dumps(versions, indent=2)
+    except DaedalusError as e:
+        return _err(e)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="List system properties",
+        readOnlyHint=True,
+        idempotentHint=True,
+    ),
+)
+async def daedalus_system_property_list(ctx: Context) -> str:
+    """List container system property values.
+
+    Returns a flat JSON object of dotted keys (e.g. "build.cpus") to
+    string values.  NOTE: on container 1.3.1 the runtime exposes only
+    this verb — `daedalus_system_property_get`/`set` return the
+    runtime's honest error on this host.
+    """
+    dc = _get_ctx(ctx)
+    try:
+        props = await dc.forge.system_property_list()
+        return json.dumps(props, indent=2)
+    except DaedalusError as e:
+        return _err(e)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Get a system property",
+        readOnlyHint=True,
+        idempotentHint=True,
+    ),
+)
+async def daedalus_system_property_get(
+    key: str,
+    ctx: Context | None = None,
+) -> str:
+    """Read a single system property value by dotted key.
+
+    NOTE: on container 1.3.1 the runtime exposes only `system property
+    list` — this returns the runtime's honest CapabilityError (an
+    isError result) on this host.
+    """
+    assert ctx is not None
+    dc = _get_ctx(ctx)
+    try:
+        value = await dc.forge.system_property_get(key)
+        return _ok({"key": key, "value": value})
+    except DaedalusError as e:
+        return _err(e)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Set a system property",
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+    ),
+)
+async def daedalus_system_property_set(
+    key: str,
+    value: str,
+    ctx: Context | None = None,
+) -> str:
+    """Set a system property value (audited host-configuration change).
+
+    NOTE: on container 1.3.1 the runtime exposes only `system property
+    list` — set returns the runtime's honest CapabilityError (an
+    isError result) on this host.  The attempted change is recorded in
+    the audit log.
+    """
+    assert ctx is not None
+    dc = _get_ctx(ctx)
+    try:
+        await dc.backend.system_property_set(key, value)
+    except DaedalusError as e:
+        _audit_agent(
+            dc, "system_property_set", {"key": key, "value": value},
+            error=e.message,
+        )
+        return _err(e)
+    _audit_agent(dc, "system_property_set", {"key": key, "value": value})
+    return _ok({"set": True, "key": key, "value": value})
 
 
 @mcp.tool(

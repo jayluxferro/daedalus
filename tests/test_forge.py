@@ -192,8 +192,12 @@ class MockBackend(Backend):
         return spec.tag or "built-image:latest"
 
     # -- registry --
+    async def registry_list(self) -> list[str]:
+        return []
+
     async def registry_login(self, server: str, **kwargs: object) -> None:
         pass
+
     async def registry_logout(self, server: str) -> None:
         pass
     async def registry_default_inspect(self) -> str:

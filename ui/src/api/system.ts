@@ -79,6 +79,107 @@ export function useSystemRestart() {
 }
 
 // ---------------------------------------------------------------------------
+// System version + properties (phase 9)
+// ---------------------------------------------------------------------------
+
+/** One app's version block — mirrors ``container system version --format json``. */
+export interface SystemVersionEntry {
+  version: string
+  commit: string
+  buildType: string
+}
+
+/** Keyed by app name (e.g. ``container``, ``container-apiserver``). */
+export type SystemVersion = Record<string, SystemVersionEntry>
+
+export function getSystemVersion() {
+  return apiGet<SystemVersion>('/system/version')
+}
+
+/**
+ * Version only changes on an upgrade — fetch once and treat as near-static.
+ * (No refetchInterval; staleTime is long.)
+ */
+export function useSystemVersion() {
+  return useQuery({
+    queryKey: ['system-version'],
+    queryFn: getSystemVersion,
+    staleTime: 5 * 60 * 1000,
+  })
+}
+
+export function getSystemProperties() {
+  return apiGet<{ properties: Record<string, string> }>('/system/properties')
+}
+
+/** System property key-values are host configuration — near-static. */
+export function useSystemProperties() {
+  return useQuery({
+    queryKey: ['system-properties'],
+    queryFn: getSystemProperties,
+    staleTime: 5 * 60 * 1000,
+  })
+}
+
+// ---------------------------------------------------------------------------
+// Registry (phase 1 API surface, surfaced in the UI for phase 9)
+// ---------------------------------------------------------------------------
+
+export function getRegistryDefault() {
+  return apiGet<{ host: string }>('/registry/default')
+}
+
+export function useRegistryDefault() {
+  return useQuery({
+    queryKey: ['registry-default'],
+    queryFn: getRegistryDefault,
+    refetchInterval: 10000,
+  })
+}
+
+export interface RegistryLoginBody {
+  server: string
+  username?: string
+  password?: string
+  scheme?: string
+}
+
+export function useRegistryLogin() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (body: RegistryLoginBody) =>
+      apiPost<{ status: string; server: string }>('/registry/login', body),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['registry-default'] }),
+  })
+}
+
+export function useRegistryLogout() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (server: string) =>
+      apiPost<{ status: string; server: string }>(`/registry/logout?server=${encodeURIComponent(server)}`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['registry-default'] }),
+  })
+}
+
+export function useRegistryDefaultSet() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ host, scheme }: { host: string; scheme?: string }) =>
+      apiPost<{ status: string; host: string; scheme?: string | null }>('/registry/default', { host, scheme }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['registry-default'] }),
+  })
+}
+
+export function useRegistryDefaultUnset() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: () => apiDelete<{ status: string }>('/registry/default'),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['registry-default'] }),
+  })
+}
+
+// ---------------------------------------------------------------------------
 // Networks (container 1.2.2)
 // ---------------------------------------------------------------------------
 

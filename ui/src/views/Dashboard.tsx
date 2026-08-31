@@ -1,4 +1,5 @@
-import { useSystemStatus, useBuilderStatus, useSystemRestart } from '../api/system'
+import { useState } from 'react'
+import { useSystemStatus, useBuilderStatus, useSystemRestart, useSystemVersion, useSystemProperties } from '../api/system'
 import { useContainers, useStats, useCpuPercentMap, useStatsHistory, type StatsRate } from '../api/containers'
 import { useImages, usePruneImages } from '../api/images'
 import { Box, GlassBox, StatCard, Badge } from './shared'
@@ -105,6 +106,8 @@ export default function Dashboard() {
           </div>
         </GlassBox>
 
+        <SystemSection />
+
         <GlassBox>
           <h3 style={{ fontSize: 14, fontWeight: 600, marginBottom: 12, color: 'var(--muted-fg)' }}>Runtime Features</h3>
           <div style={{ fontSize: 12, color: 'var(--muted-fg)' }}>
@@ -130,6 +133,54 @@ export default function Dashboard() {
         </GlassBox>
       </div>
     </Box>
+  )
+}
+
+/**
+ * Phase-9 System section: one version line per app (container,
+ * container-apiserver) plus a collapsible property key-value list —
+ * both data-driven off their API modules, nothing hard-coded.
+ */
+function SystemSection() {
+  const { data: version } = useSystemVersion()
+  const { data: props } = useSystemProperties()
+  const [showProps, setShowProps] = useState(false)
+
+  const entries = version ? Object.entries(version) : []
+  const properties = props?.properties ? Object.entries(props.properties).sort(([a], [b]) => a.localeCompare(b)) : []
+
+  return (
+    <GlassBox>
+      <h3 style={{ fontSize: 14, fontWeight: 600, marginBottom: 12, color: 'var(--muted-fg)' }}>System</h3>
+      {entries.length === 0 ? (
+        <p style={{ fontSize: 12, color: 'var(--muted-fg)', margin: 0 }}>... </p>
+      ) : (
+        entries.map(([app, info]) => (
+          <div key={app} style={{ fontSize: 12, color: 'var(--muted-fg)', marginBottom: 4, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            <span style={{ color: 'var(--fg)', fontWeight: 600, minWidth: 150 }}>{app}</span>
+            <span>v{info.version}</span>
+            <span>commit {info.commit ? info.commit.slice(0, 12) : '—'}</span>
+            <span>build {info.buildType || '—'}</span>
+          </div>
+        ))
+      )}
+      <button
+        onClick={() => setShowProps(v => !v)}
+        style={{ marginTop: 8, padding: '6px 12px', fontSize: 12, background: '#1c1c22', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--fg)', cursor: 'pointer' }}
+      >
+        {showProps ? 'Hide' : 'Show'} system properties ({properties.length})
+      </button>
+      {showProps && (
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '2px 24px', marginTop: 12, fontSize: 12 }}>
+          {properties.map(([k, v]) => (
+            <div key={k} style={{ display: 'flex', justifyContent: 'space-between', gap: 8, padding: '2px 0', borderBottom: '1px solid #1c1c22' }}>
+              <code style={{ color: 'var(--muted-fg)', fontSize: 11 }}>{k}</code>
+              <span style={{ color: 'var(--fg)', textAlign: 'right' }}>{v}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </GlassBox>
   )
 }
 

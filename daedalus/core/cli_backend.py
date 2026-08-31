@@ -212,6 +212,29 @@ class OutputParser:
         return [l for l in text.strip().splitlines() if l.strip()]
 
     @staticmethod
+    def registry_list(text: str) -> list[str]:
+        """Parse ``container registry list --format json`` (1.3.x).
+
+        Element shape is ``[{...}]`` (empty when no logins); the server name
+        is read from ``server``/``registry``/``host`` keys, tolerant to
+        unknown shapes.
+        """
+        data = OutputParser.json(text)
+        items: list[dict[str, Any]] = []
+        if isinstance(data, list):
+            items = [i for i in data if isinstance(i, dict)]
+        elif isinstance(data, dict) and data:
+            items = [data]
+        servers: list[str] = []
+        for item in items:
+            for key in ("server", "registry", "host", "name"):
+                val = item.get(key)
+                if val and str(val).strip():
+                    servers.append(str(val))
+                    break
+        return servers
+
+    @staticmethod
     def container_item(item: dict[str, Any]) -> ContainerInfo:
         """Parse one ``container list --format json`` element (container ≥ 1.x).
 
@@ -1272,10 +1295,19 @@ class CliBackend(Backend):
     async def registry_logout(self, server: str) -> None:
         await _run_cli_impl("registry", "logout", server, binary=self._binary)
 
-    async def registry_default_inspect(self) -> str:
+    async def registry_list(self) -> list[str]:
+        """Logged-in registry servers (``container registry list``)."""
         _, out, _ = await _run_cli_impl(
-            "registry", "default", "inspect", binary=self._binary,
+            "registry", "list", "--format", "json", binary=self._binary,
         )
+        return OutputParser.registry_list(out)
+
+    async def registry_default_inspect(self) -> str:
+        _, out, err = await _run_cli_impl(
+            "registry", "default", "inspect", binary=self._binary,
+            check=False,
+        )
+        self._registry_default_guard(out + err)
         return out.strip()
 
     async def registry_default_set(self, host: str, scheme: str | None = None) -> None:
@@ -1283,10 +1315,30 @@ class CliBackend(Backend):
         if scheme:
             cmd += ["--scheme", scheme]
         cmd.append(host)
-        await _run_cli_impl(*cmd, binary=self._binary)
+        _, out, err = await _run_cli_impl(*cmd, binary=self._binary, check=False)
+        self._registry_default_guard(out + err)
 
     async def registry_default_unset(self) -> None:
-        await _run_cli_impl("registry", "default", "unset", binary=self._binary)
+        _, out, err = await _run_cli_impl(
+            "registry", "default", "unset", binary=self._binary, check=False,
+        )
+        self._registry_default_guard(out + err)
+
+    def _registry_default_guard(self, output: str) -> None:
+        """Fail loudly when the runtime lacks the ``registry default`` tree.
+
+        container 1.3.1 exposes only ``registry login/logout/list`` — the
+        default-registry subcommand errors with "unexpected arguments".
+        """
+        if "unexpected arguments" in output.lower() or "unexpected argument" in output.lower():
+            raise CapabilityError(
+                message=(
+                    "registry default is not available on this host "
+                    "(container exposes only registry login/logout/list)"
+                ),
+                feature="registry_default",
+                container_version=self._caps.container_version,
+            )
 
     # ==================================================================
     # Builder

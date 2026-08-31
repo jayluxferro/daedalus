@@ -437,6 +437,9 @@ anything still gated lives in the "container reality" note below.
 | talos | DNS control (`--dns`, `--dns-domain`, `--dns-search`, `--no-dns`), system DNS (create/delete/list) | CLI, API, MCP |
 | forge | prune — stop + reclaim disk via `container prune` | CLI, API, MCP |
 | forge | detonate — the full orchestrated loop (runtime-security floor gate → policy gate → disposable internal network → pre/post FS export diff → sample delivery to /root → exec + stats sampling → Minos report + risk score → store artifacts + audit → destroy). §5.1, SPEC phase 3 | CLI, API, MCP |
+| forge | system plane (SPEC phase 9) — `system property list` (TOML flattened to dotted keys, e.g. `build.cpus`), `system version` (per-appName from `--format json`: `container`, `container-apiserver`), structured `system df` (per-category store accounting from `--format json` merged with host-measured `total`/`free`, tagged `source: "container system df --format json"`); `system_property_set` is audited on success | CLI, API, MCP |
+| api/forge | Docker Hub image search — server-side `GET /images/search` (stdlib `urllib`, no auth, no new deps; Hub sends no CORS headers so the UI cannot fetch directly; degrades to an empty list on failure) | API, UI |
+| ui | phase-9 parity views — Registries page (login state via default-registry inspect, login/logout forms, default set/unset), Hub search in the Images pull modal (debounced ≥ 2 chars), multi-pane log split view (2–4 containers, per-pane colors), Dashboard System section (per-service versions + property key-values, data-driven) | UI |
 | profiles | detonation, bench, fuzz, isolated, deception; custom profiles carry `init_image`/`ssh` | CLI, API, MCP |
 | policy | concurrency, disk, image allow/block-list, confirm gates (destroy, network delete, network expose, kernel), runtime-security floor (`check_runtime_security`) | Engine |
 | audit | append-only, checksummed JSONL audit log | Engine |
@@ -484,18 +487,34 @@ set`) work.  `--init-image` and `--ssh` are **live** (1.3.1) — serialised as
 `RunSpec.init_image` / `RunSpec.ssh`, so ariadne's eBPF init-image telemetry is unblocked.
 Registry scheme is `--scheme http|https` only — **`auto` was removed in container 1.3.0**
 (the default is https); daedalus never emits `auto`.
+On 1.3.1 the system property family is **list-only** (verified live: `container system property
+--help` lists just `list, ls`; `get`/`set` answer `Error: N unexpected arguments`), so
+`system_property_get`/`set` fail loudly with the honest list-only CapabilityError (CLI exit 1,
+API 400, MCP isError) instead of leaking the runtime's usage text as a property value — the
+wrappers change as soon as a future container release grows the subcommand.  The `registry
+default` tree likewise does not exist on 1.3.1 (only `registry login/logout/list`); the
+backend's fail-loud guard reports that absence rather than returning the runtime's error text
+as a default-host value.  Both are runtime-version facts, and the W4 integration suite
+(`tests/integration/test_system_plane.py`) pins them live.
 
 ### Quality gates (all passing)
 
 ```
 mypy --strict daedalus/     → Success: no issues found in 27 source files
-pytest tests/               → 417 passed, 2 skipped (386 non-integration + 31 integration; the slow systemd machine-boot test skips on the container exec limitation, upstream apple/container#1669; the k8s create round-trip is opt-in via `DAEDALUS_K8S_LIVE_TEST=1` — live clusters are heavy)
+pytest tests/               → 420 passed, 2 skipped, 1 known failure (386 non-integration + 34 integration; the slow systemd machine-boot test skips on the container exec limitation, upstream apple/container#1669; the k8s create round-trip is opt-in via `DAEDALUS_K8S_LIVE_TEST=1` — live clusters are heavy)
 Detonation §M7 test         → 2 live detonations: dropper vs no-op reports distinguishable, no VM/network leaks (tests/integration/test_detonation.py)
 Import-time I/O             → zero subprocess calls
-MCP (stdio)                 → 73 tools, handshake verified
+MCP (stdio)                 → 77 tools, handshake verified
 MCP (cartograph federation) → discover + call verified
-API (FastAPI)               → /health, /stats, /stats/history, /stats/stream, /networks, /containers, /images, /profiles, /system/status, /detonate, /experiments, /clusters
+API (FastAPI)               → /health, /stats, /stats/history, /stats/stream, /networks, /containers, /images, /images/search, /registry/login|logout|default, /profiles, /system/status, /system/version, /system/properties*, /detonate, /experiments, /clusters
 ```
+
+The one known failure is `tests/integration/test_system_plane.py::test_registry_list_and_default_guard`
+(SPEC phase 9 W4): the registry-default fail-loud guard reads **stdout** only, but container
+1.3.1 writes its `unexpected arguments` error to **stderr**, so `registry_default_inspect()`
+returns `""` without raising.  Fix: guard on combined stdout+stderr
+(`daedalus/core/cli_backend.py` `registry_default_inspect/set/unset`).  Once fixed the suite is
+421 passed, 2 skipped.
 
 ---
 

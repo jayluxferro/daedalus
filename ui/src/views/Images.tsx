@@ -1,5 +1,5 @@
-import { useState } from 'react'
-import { useImages, usePullImage, useDeleteImage, useInspectImage, useBuildImage, usePushImage, useLoadImage, useSaveImage, useTagImage, usePruneImages, imageRef } from '../api/images'
+import { useState, useEffect } from 'react'
+import { useImages, usePullImage, useDeleteImage, useInspectImage, useBuildImage, usePushImage, useLoadImage, useSaveImage, useTagImage, usePruneImages, useImageSearch, imageRef } from '../api/images'
 import { Box, GlassBox, Modal } from './shared'
 
 export default function ImagesView() {
@@ -104,11 +104,59 @@ function InspectModal({ name, onClose }: { name: string; onClose: () => void }) 
 
 function PullForm({ onDone }: { onDone: () => void }) {
   const [image, setImage] = useState('')
+  const [searchQuery, setSearchQuery] = useState('')
+  const [debounced, setDebounced] = useState('')
   const pull = usePullImage()
+  const search = useImageSearch(debounced)
+
+  // Debounce the Hub search — it fires on every keystroke once ≥2 chars.
+  useEffect(() => {
+    const t = setTimeout(() => setDebounced(searchQuery.trim()), 300)
+    return () => clearTimeout(t)
+  }, [searchQuery])
+
+  const canSearch = debounced.length >= 2
 
   return (
     <form onSubmit={e => { e.preventDefault(); pull.mutate(image, { onSuccess: onDone }) }} style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
       <label style={label}>Image reference <input value={image} onChange={e => setImage(e.target.value)} placeholder="e.g. alpine:latest" style={input} /></label>
+
+      <label style={label}>Search Docker Hub
+        <input value={searchQuery} onChange={e => setSearchQuery(e.target.value)} placeholder="e.g. alpine" style={input} />
+      </label>
+      {!canSearch && <p style={{ fontSize: 11, color: 'var(--muted-fg)', margin: 0 }}>Type at least 2 characters to search Docker Hub.</p>}
+      {canSearch && search.isLoading && <p style={{ fontSize: 11, color: 'var(--muted-fg)', margin: 0 }}>Searching Docker Hub...</p>}
+      {canSearch && search.isError && (
+        <p style={{ fontSize: 11, color: 'var(--muted-fg)', margin: 0 }}>
+          Docker Hub unreachable — search unavailable ({(search.error as Error).message}). Pull by name above.
+        </p>
+      )}
+      {canSearch && search.isSuccess && !search.isFetching && search.data && search.data.length === 0 && (
+        <p style={{ fontSize: 11, color: 'var(--muted-fg)', margin: 0 }}>No repositories match “{debounced}”.</p>
+      )}
+      {canSearch && search.data && search.data.length > 0 && (
+        <div style={{ maxHeight: 180, overflow: 'auto', border: '1px solid var(--border)', borderRadius: 6, background: '#0f0f13' }}>
+          {search.data.map(r => (
+            <button
+              key={r.repo_name}
+              type="button"
+              onClick={() => { setImage(r.repo_name); setSearchQuery(''); setDebounced('') }}
+              style={{ display: 'block', width: '100%', textAlign: 'left', padding: '6px 10px', background: 'transparent', border: 'none', borderBottom: '1px solid #1c1c22', cursor: 'pointer', color: 'var(--fg)' }}
+            >
+              <span style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+                <code style={{ fontSize: 12 }}>{r.repo_name}</code>
+                <span style={{ fontSize: 11, color: 'var(--muted-fg)', flexShrink: 0 }}>★ {r.star_count}</span>
+              </span>
+              {r.short_description && (
+                <span style={{ display: 'block', fontSize: 11, color: 'var(--muted-fg)', marginTop: 2 }}>
+                  {r.short_description}
+                </span>
+              )}
+            </button>
+          ))}
+        </div>
+      )}
+
       <button type="submit" disabled={pull.isPending || !image} style={{ ...btnStyle, width: '100%' }}>
         {pull.isPending ? 'Pulling...' : 'Pull'}
       </button>

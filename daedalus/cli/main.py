@@ -26,7 +26,11 @@ from daedalus.core.backend import (
 from daedalus.core.capabilities import CapabilityManifest, ensure_daemon, probe
 from daedalus.core.cli_backend import CliBackend
 from daedalus.core.clusters import Clusters
-from daedalus.core.exceptions import DetonationError, ValidationError
+from daedalus.core.exceptions import (
+    CapabilityError,
+    DetonationError,
+    ValidationError,
+)
 from daedalus.core.forge import Forge
 from daedalus.core.icarus import ExecOptions, Icarus
 from daedalus.core.machina import Machina
@@ -292,7 +296,7 @@ def create(
             command=cmd_list, confirm_kernel=confirm_kernel, **kwargs,
         )
         if json_output:
-            console.print(json.dumps(lab.info.raw, indent=2))
+            print(json.dumps(lab.info.raw, indent=2))
         else:
             console.print(f"[green]✓[/] Created [bold]{lab.id[:12]}[/] (stopped)")
             console.print(f"  Start with: daedalus start {lab.id[:12]}")
@@ -441,7 +445,7 @@ def run(
             command=cmd_list, confirm_kernel=confirm_kernel, **kwargs,
         )
         if json_output:
-            console.print(json.dumps(lab.info.raw, indent=2))
+            print(json.dumps(lab.info.raw, indent=2))
         else:
             console.print(f"[green]✓[/] Created [bold]{lab.id[:12]}[/] from [cyan]{image}[/]")
             if lab.name:
@@ -506,7 +510,7 @@ def detonate(
                     console.print(f"    {role}: {path}")
             raise typer.Exit(code=1) from None
         if json_output:
-            console.print(json.dumps(result, indent=2))
+            print(json.dumps(result, indent=2))
             return
         _print_detonation_report(result)
     asyncio.run(_go())
@@ -696,7 +700,7 @@ def stats(
     async def _go() -> None:
         samples = await _f().stats(container_id)
         if json_output:
-            console.print(json.dumps([s.to_dict() for s in samples], indent=2))
+            print(json.dumps([s.to_dict() for s in samples], indent=2))
             return
         if not samples:
             console.print("[dim]No stats available.[/]")
@@ -848,7 +852,7 @@ def network_list(
     async def _go() -> None:
         networks = await _t().network_list()
         if json_output:
-            console.print(json.dumps([_network_dict(n) for n in networks], indent=2))
+            print(json.dumps([_network_dict(n) for n in networks], indent=2))
             return
         if not networks:
             console.print("[dim]No networks.[/]")
@@ -881,7 +885,7 @@ def network_inspect(
     async def _go() -> None:
         info = await _t().network_inspect(name)
         if json_output:
-            console.print(json.dumps(_network_dict(info), indent=2))
+            print(json.dumps(_network_dict(info), indent=2))
             return
         console.print(f"Name:    {info.name or info.id}")
         console.print(f"Plugin:  {info.plugin or '-'}")
@@ -959,7 +963,7 @@ def machine_list(
     async def _go() -> None:
         machines = await _mc().list()
         if json_output:
-            console.print(json.dumps([m.to_dict() for m in machines], indent=2))
+            print(json.dumps([m.to_dict() for m in machines], indent=2))
             return
         if not machines:
             console.print("[dim]No machines.[/]")
@@ -995,7 +999,7 @@ def machine_inspect(
     async def _go() -> None:
         info = await _mc().inspect(machine_id)
         if json_output:
-            console.print(json.dumps(info.to_dict(), indent=2))
+            print(json.dumps(info.to_dict(), indent=2))
             return
         console.print(f"Name:    {info.id}")
         console.print(f"Status:  {info.status or '-'}")
@@ -1175,7 +1179,7 @@ def volume_list(
     async def _go() -> None:
         volumes = await _v().list()
         if json_output:
-            console.print(json.dumps([v.to_dict() for v in volumes], indent=2))
+            print(json.dumps([v.to_dict() for v in volumes], indent=2))
             return
         if not volumes:
             console.print("[dim]No volumes.[/]")
@@ -1210,7 +1214,7 @@ def volume_inspect(
     async def _go() -> None:
         info = await _v().inspect(name)
         if json_output:
-            console.print(json.dumps(info.to_dict(), indent=2))
+            print(json.dumps(info.to_dict(), indent=2))
             return
         size = info.size_spec or (_fmt_size(info.size_bytes) if info.size_bytes else "-")
         console.print(f"Name:    {info.name or info.id}")
@@ -1354,7 +1358,7 @@ def k8s_list(
     async def _go() -> None:
         clusters = await _cl().list()
         if json_output:
-            console.print(json.dumps([c.to_dict() for c in clusters], indent=2))
+            print(json.dumps([c.to_dict() for c in clusters], indent=2))
             return
         if not clusters:
             console.print("[dim]No clusters.[/]")
@@ -1679,6 +1683,175 @@ def audit_cmd(
 
 
 # ==================================================================
+# System plane (SPEC phase 9 §4 W2) — property / version / df
+# ==================================================================
+
+
+system_app = typer.Typer(
+    name="system",
+    help="Inspect and configure the container runtime (properties, version, disk).",
+    no_args_is_help=True,
+)
+
+property_app = typer.Typer(
+    name="property",
+    help="Read and modify container system property values.",
+    no_args_is_help=True,
+)
+system_app.add_typer(property_app, name="property")
+
+
+@property_app.command("list")
+def system_property_list(
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """List system property values as dotted keys (e.g. build.cpus).
+
+    The engine returns the runtime's own ``system property list``
+    (TOML flattened to dot notation).  ``--json`` emits the flat dict.
+    """
+    _bootstrap()
+
+    async def _go() -> None:
+        props = await _f().system_property_list()
+        if json_output:
+            # plain print, not console.print: Rich wraps long lines at the
+            # console width and would break the JSON (pre-existing pattern
+            # across the CLI; the JSON branches must stay machine-readable).
+            print(json.dumps(props, indent=2))
+            return
+        if not props:
+            console.print("[dim]No properties reported.[/]")
+            return
+        table = Table(title="System Properties")
+        table.add_column("Key", style="cyan")
+        table.add_column("Value")
+        for key in sorted(props):
+            table.add_row(key, props[key])
+        console.print(table)
+    asyncio.run(_go())
+
+
+@property_app.command("get")
+def system_property_get(
+    key: Annotated[str, typer.Argument(help="Dotted property key, e.g. build.cpus")],
+) -> None:
+    """Read a single system property value.
+
+    NOTE: container 1.3.1 exposes only ``system property list`` — the
+    runtime's own message is printed and the command exits 1.
+    """
+    _bootstrap()
+
+    async def _go() -> None:
+        try:
+            value = await _f().system_property_get(key)
+        except CapabilityError as e:
+            console.print(f"[red]Error:[/] {e.message}")
+            raise typer.Exit(1) from None
+        console.print(value)
+    asyncio.run(_go())
+
+
+@property_app.command("set")
+def system_property_set(
+    key: Annotated[str, typer.Argument(help="Dotted property key, e.g. build.cpus")],
+    value: Annotated[str, typer.Argument(help="New value as a string")],
+) -> None:
+    """Set a system property value (audited host-configuration change).
+
+    NOTE: container 1.3.1 exposes only ``system property list`` — the
+    runtime's own message is printed and the command exits 1.
+    """
+    _bootstrap()
+
+    async def _go() -> None:
+        try:
+            await _f().system_property_set(key, value)
+        except CapabilityError as e:
+            console.print(f"[red]Error:[/] {e.message}")
+            raise typer.Exit(1) from None
+        console.print(f"[green]✓[/] Set [bold]{key}[/] = {value}")
+    asyncio.run(_go())
+
+
+@system_app.command("version")
+def system_version(
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Show container service version info (per appName).
+
+    Mirrors ``container system version --format json``: one row per
+    service (container, container-apiserver on 1.3.1).
+    """
+    _bootstrap()
+
+    async def _go() -> None:
+        versions = await _f().system_version()
+        if json_output:
+            # plain print — see system_property_list --json for the wrap bug.
+            print(json.dumps(versions, indent=2))
+            return
+        if not versions:
+            console.print("[dim]No version info reported.[/]")
+            return
+        table = Table(title="System Versions")
+        table.add_column("App", style="cyan")
+        table.add_column("Version")
+        table.add_column("Commit")
+        table.add_column("Build")
+        for name in sorted(versions):
+            info = versions[name]
+            table.add_row(
+                name,
+                str(info.get("version", "")),
+                str(info.get("commit", "")),
+                str(info.get("buildType", "")),
+            )
+        console.print(table)
+    asyncio.run(_go())
+
+
+@system_app.command("df")
+def system_df(
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Show container store disk usage (per-category + totals).
+
+    Reuses the engine's ``system_df`` (runtime store accounting via
+    ``container system df --format json``, with host-measured
+    total/free merged in).
+    """
+    _bootstrap()
+
+    async def _go() -> None:
+        df = await _b().system_df()
+        if json_output:
+            # plain print — see system_property_list --json for the wrap bug.
+            print(json.dumps(df, indent=2))
+            return
+        table = Table(title="Container Store Disk Usage")
+        table.add_column("Category", style="cyan")
+        table.add_column("Active")
+        table.add_column("Total")
+        table.add_column("Size (bytes)")
+        for category in ("containers", "images", "volumes"):
+            info = df.get(category)
+            if isinstance(info, dict):
+                table.add_row(
+                    category,
+                    str(info.get("active", "?")),
+                    str(info.get("total", "?")),
+                    str(info.get("sizeInBytes", "?")),
+                )
+        console.print(table)
+        for label, key in (("Used", "used"), ("Total", "total"), ("Free", "free")):
+            if key in df:
+                console.print(f"{label}: {df[key]}")
+    asyncio.run(_go())
+
+
+# ==================================================================
 # System
 # ==================================================================
 
@@ -1957,6 +2130,7 @@ app.add_typer(machine_app, name="machine")
 app.add_typer(volume_app, name="volume")
 app.add_typer(kernel_app, name="kernel")
 app.add_typer(k8s_app, name="k8s")
+app.add_typer(system_app, name="system")
 
 
 if __name__ == "__main__":

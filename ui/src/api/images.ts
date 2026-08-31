@@ -111,3 +111,39 @@ export function usePruneImages() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['images'] }),
   })
 }
+
+// ---------------------------------------------------------------------------
+// Docker Hub search (phase 9) — host-side direct fetch, no backend hop.
+// CORS / network failures are expected on some hosts; callers degrade.
+// ---------------------------------------------------------------------------
+
+export interface HubImageResult {
+  repo_name: string
+  short_description: string
+  star_count: number
+}
+
+export interface HubSearchResponse {
+  count: number
+  results: HubImageResult[]
+}
+
+/**
+ * Search Docker Hub via the daedalus API (server-side fetch — Hub sends no
+ * CORS headers, so the browser cannot call it directly).
+ */
+export async function searchImages(query: string, limit = 10): Promise<HubImageResult[]> {
+  const res = await fetch(`/images/search?q=${encodeURIComponent(query)}&limit=${limit}`)
+  if (!res.ok) throw new Error(`image search: HTTP ${res.status}`)
+  return (await res.json()) as HubImageResult[]
+}
+
+/** Enabled once the query is at least 2 characters. */
+export function useImageSearch(query: string, limit = 10) {
+  return useQuery({
+    queryKey: ['image-search', query.trim(), limit],
+    queryFn: () => searchImages(query, limit),
+    enabled: query.trim().length >= 2,
+    staleTime: 60 * 1000,
+  })
+}

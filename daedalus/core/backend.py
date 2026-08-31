@@ -906,6 +906,11 @@ class Backend(ABC):
         ...
 
     @abstractmethod
+    async def registry_list(self) -> builtins.list[str]:
+        """Logged-in registry servers (container 1.3.x)."""
+        ...
+
+    @abstractmethod
     async def registry_logout(self, server: str) -> None:
         """Log out from a registry."""
         ...
